@@ -947,8 +947,12 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const shift = -dx / width * logSpan;
       const newLogMin = logMin + shift;
       const newLogMax = logMax + shift;
-      viewXMin = Math.max(10, Math.pow(10, newLogMin));
-      viewXMax = Math.min(48000, Math.pow(10, newLogMax));
+      let newXMin = Math.pow(10, newLogMin);
+      let newXMax = Math.pow(10, newLogMax);
+      if (newXMin >= 10 && newXMax <= 48000) {
+        viewXMin = newXMin;
+        viewXMax = newXMax;
+      }
       // Vertical pan linear in dB
       const dBSpan = viewYMax - viewYMin;
       const dBShift = dy / height * dBSpan;
