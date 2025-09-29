@@ -108,6 +108,7 @@
     let viewYMax = 0;       // dB
     let isPanning = false;
     let panStart = null;
+    let showImpulse = false; // false = spectrum view, true = impulse response view
 
     // Capability checks
     const canSelectOutput = () => typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
@@ -620,6 +621,11 @@ registerProcessor('recorder-processor', RecorderProcessor);
         drawSpectrum();
       });
       document.getElementById('resetView').addEventListener('click', () => resetSpectrumView());
+      document.getElementById('toggleView').addEventListener('click', () => {
+        showImpulse = !showImpulse;
+        document.getElementById('toggleView').textContent = showImpulse ? 'Show Spectrum' : 'Show Impulse';
+        drawSpectrum();
+      });
 
       initSpectrumCanvasInteractions();
     }
@@ -847,28 +853,53 @@ registerProcessor('recorder-processor', RecorderProcessor);
       ctx.font = `${12 * dpr}px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial`;
       ctx.textBaseline = 'top';
       ctx.fillStyle = 'rgba(229,231,235,0.8)';
-      drawSpectrumGrid(ctx, width, height);
-      if (!spectrumSamples) { ctx.restore(); return; }
-      const sr = audioContext ? audioContext.sampleRate : 48000;
-      let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
-      const smoothSlider = document.getElementById('smoothSize');
-      const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
-      if (smoothFactor > 0) {
-        magDb = applyFrequencySmoothing(freq, magDb, smoothFactor);
+      if (!showImpulse) {
+        // Frequency-domain view
+        drawSpectrumGrid(ctx, width, height);
+        if (!spectrumSamples) { ctx.restore(); return; }
+        const sr = audioContext ? audioContext.sampleRate : 48000;
+        let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
+        const smoothSlider = document.getElementById('smoothSize');
+        const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
+        if (smoothFactor > 0) {
+          magDb = applyFrequencySmoothing(freq, magDb, smoothFactor);
+        }
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#34d399';
+        ctx.beginPath();
+        let moved = false;
+        for (let i = 1; i < freq.length; i++) {
+          const f = freq[i];
+          if (f < viewXMin || f > viewXMax) continue;
+          const d = magDb[i];
+          const x = mapLog(f, viewXMin, viewXMax, 0, width);
+          const y = mapLinear(d, viewYMax, viewYMin, 0, height);
+          if (!moved) { ctx.moveTo(x, y); moved = true; } else { ctx.lineTo(x, y); }
+        }
+        ctx.stroke();
+      } else {
+        // Time-domain impulse response (minimum-phase) view
+        if (!spectrumSamples) { ctx.restore(); return; }
+        const sr = audioContext ? audioContext.sampleRate : 48000;
+        let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
+        const smoothSlider = document.getElementById('smoothSize');
+        const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
+        if (smoothFactor > 0) { magDb = applyFrequencySmoothing(freq, magDb, smoothFactor); }
+        // Build minimum-phase impulse from magnitude response
+        const ir = buildMinimumPhaseIRFromMag(freq, magDb, sr);
+        // Draw impulse normalized
+        const N = ir.length;
+        let maxAbs = 1e-9;
+        for (let i = 0; i < N; i++) maxAbs = Math.max(maxAbs, Math.abs(ir[i]));
+        ctx.strokeStyle = '#60a5fa';
+        ctx.beginPath();
+        for (let i = 0; i < N; i++) {
+          const x = i / (N - 1) * width;
+          const y = height / 2 - (ir[i] / maxAbs) * (height * 0.45);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
       }
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#34d399';
-      ctx.beginPath();
-      let moved = false;
-      for (let i = 1; i < freq.length; i++) {
-        const f = freq[i];
-        if (f < viewXMin || f > viewXMax) continue;
-        const d = magDb[i];
-        const x = mapLog(f, viewXMin, viewXMax, 0, width);
-        const y = mapLinear(d, viewYMax, viewYMin, 0, height);
-        if (!moved) { ctx.moveTo(x, y); moved = true; } else { ctx.lineTo(x, y); }
-      }
-      ctx.stroke();
       ctx.restore();
     }
 
@@ -988,48 +1019,130 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const fftSlider = document.getElementById('fftSize');
       const fftLabel = document.getElementById('fftLabel');
       if (fftSlider && fftLabel) { fftSlider.value = String(spectrumFftSize); fftLabel.textContent = String(spectrumFftSize); }
+      // Redraw immediately so the change is visible without extra interaction
+      drawSpectrum();
     }
 
-    // Apply frequency-dependent smoothing. The window grows with frequency and smoothFactor.
-    // smoothFactor in [0,1]. Returns new array of smoothed dB magnitudes.
-    function applyFrequencySmoothing(freq, magDb, smoothFactor) {
+    // Build a minimum-phase impulse response from log-magnitude response (in dB)
+    // Steps:
+    // 1) Interpolate mag to uniform linear frequency bins up to Nyquist
+    // 2) Convert dB -> linear magnitude; clamp to avoid zeros
+    // 3) Compute log magnitude, Hilbert transform to get minimum-phase
+    // 4) Form complex spectrum: H(w) = |H(w)| * exp(j * phase)
+    // 5) IFFT to time domain and take real part. Normalize length to convenient power of two
+    function buildMinimumPhaseIRFromMag(freqHz, magDb, sampleRate) {
+      const nyquist = sampleRate / 2;
+      const N = nearestPow2(Math.max(1024, spectrumFftSize));
+      const half = N >> 1;
+      // Uniform frequency grid 0..Nyquist
+      const magLinear = new Float32Array(half + 1);
+      // Interpolate dB magnitudes to linear bins
+      for (let k = 0; k <= half; k++) {
+        const f = (k / half) * nyquist;
+        const db = interpDbAt(freqHz, magDb, f);
+        const lin = Math.pow(10, db / 20);
+        magLinear[k] = Math.max(1e-9, lin);
+      }
+      // Log magnitude
+      const logMag = new Float32Array(half + 1);
+      for (let k = 0; k <= half; k++) logMag[k] = Math.log(magLinear[k]);
+      // Mirror to full spectrum for real IFFT of log magnitude
+      const re = new Float32Array(N);
+      const im = new Float32Array(N);
+      for (let k = 0; k <= half; k++) re[k] = logMag[k];
+      for (let k = 1; k < half; k++) re[N - k] = logMag[k];
+      // Hilbert transform via FFT: phase = Hilbert{log |H|}
+      fftRadix2(re, im); // FFT
+      // Apply Hilbert transformer: multiply positive freqs by -j, negative freqs by +j, DC and Nyquist -> 0
+      for (let k = 0; k < N; k++) {
+        if (k === 0 || k === half) { re[k] = 0; im[k] = 0; }
+        else if (k < half) { const tr = im[k]; const ti = -re[k]; re[k] = tr; im[k] = ti; }
+        else { const tr = -im[k]; const ti = re[k]; re[k] = tr; im[k] = ti; }
+      }
+      // IFFT to get analytic signal of log |H|
+      ifftRadix2(re, im);
+      // The imaginary part is the minimum-phase angle
+      const phase = new Float32Array(half + 1);
+      for (let k = 0; k <= half; k++) phase[k] = im[k];
+      // Construct complex spectrum H(k) = |H| * e^{j phase}
+      const Hr = new Float32Array(N);
+      const Hi = new Float32Array(N);
+      for (let k = 0; k <= half; k++) {
+        const a = magLinear[k];
+        Hr[k] = a * Math.cos(phase[k]);
+        Hi[k] = a * Math.sin(phase[k]);
+      }
+      // Hermitian symmetry
+      for (let k = 1; k < half; k++) {
+        Hr[N - k] = Hr[k];
+        Hi[N - k] = -Hi[k];
+      }
+      // IFFT to time domain
+      ifftRadix2(Hr, Hi);
+      // Take real part, window leading portion to reduce wrap-around, and normalize
+      const ir = new Float32Array(N);
+      let maxAbs = 1e-12;
+      for (let n = 0; n < N; n++) { ir[n] = Hr[n]; maxAbs = Math.max(maxAbs, Math.abs(ir[n])); }
+      for (let n = 0; n < N; n++) ir[n] /= maxAbs;
+      return ir;
+    }
+
+    function interpDbAt(freqHz, magDb, f) {
+      if (!freqHz || !magDb || magDb.length !== freqHz.length) return -120;
+      if (f <= freqHz[1]) return magDb[1];
+      const last = freqHz.length - 1;
+      if (f >= freqHz[last]) return magDb[last];
+      // Binary search
+      let lo = 1, hi = last;
+      while (hi - lo > 1) {
+        const mid = (hi + lo) >> 1;
+        if (freqHz[mid] < f) lo = mid; else hi = mid;
+      }
+      const t = (f - freqHz[lo]) / Math.max(1e-12, (freqHz[hi] - freqHz[lo]));
+      return magDb[lo] + t * (magDb[hi] - magDb[lo]);
+    }
+
+    function nearestPow2(n) { let p = 1; while (p < n) p <<= 1; return p; }
+
+    // IFFT via using FFT with conjugation and 1/N scaling
+    function ifftRadix2(re, im) {
+      const N = re.length;
+      for (let i = 0; i < N; i++) im[i] = -im[i];
+      fftRadix2(re, im);
+      for (let i = 0; i < N; i++) { re[i] = re[i] / N; im[i] = -im[i] / N; }
+    }
+
+    // Apply smoothing based on provided C++ algorithm (translated to JS)
+    // getWindow(idx, smoothing): raised cosine window whose width grows ~ log2(1+idx) * smoothing
+    function applyFrequencySmoothing(_freq, magDb, smoothFactor) {
       const N = magDb.length;
       if (!N || smoothFactor <= 0) return magDb;
       const out = new Float32Array(N);
-      // Use log2-based window growth: window ~ base + k * smoothFactor * log2(f/f_ref)
-      const fRef = 20; // reference frequency (20 Hz)
-      const fMin = Math.max(1e-3, freq[1] || 1); // avoid log(0)
-      // Make smoothing come on gradually: square the factor
-      const factor = smoothFactor * smoothFactor;
-      for (let i = 0; i < N; i++) {
-        const f = Math.max(fMin, freq[i] || fMin);
-        // Octave width grows as base + factor * log2(f/fRef), but stays >= minOct and <= maxOct
-        const log2Ratio = Math.max(0, Math.log2(f / fRef));
-        const minOct = 1/96;  // minimal smoothing ~ 0.0104 octaves
-        const maxOct = 1/6;   // cap smoothing ~ 0.1667 octaves
-        const baseOct = 1/96;
-        const octWidth = Math.min(maxOct, Math.max(minOct, baseOct + factor * (log2Ratio * 1/48)));
-        const fLo = f / Math.pow(2, octWidth / 2);
-        const fHi = f * Math.pow(2, octWidth / 2);
-        // find index range
-        let iLo = i, iHi = i;
-        // expand left
-        while (iLo > 1 && freq[iLo] > fLo) iLo--;
-        // expand right
-        while (iHi < N - 1 && freq[iHi] < fHi) iHi++;
-        // Weighted average with triangular weights across index window
-        const mid = (iLo + iHi) * 0.5;
-        let wsum = 0, vsum = 0;
-        for (let k = iLo; k <= iHi; k++) {
-          const dist = Math.abs(k - mid);
-          const halfSpan = (iHi - iLo) * 0.5 || 1;
-          // Use Hann weights across the window for smoother results
-          const t = halfSpan === 0 ? 0 : (1 - dist / halfSpan);
-          const w = t > 0 ? 0.5 * (1 + Math.cos(Math.PI * (1 - t))) : 0;
-          wsum += w;
-          vsum += w * magDb[k];
+      const getWindow = (idx, smoothing) => {
+        const width = Math.log2(1 + idx) * smoothing;
+        if (width <= 1) return [1.0];
+        const output = [1.0];
+        for (let j = 1; j < 100; j++) {
+          const dx = j * Math.PI / width;
+          if (dx > Math.PI) break;
+          const value = 0.5 * (1 + Math.cos(dx));
+          output.push(value);
         }
-        out[i] = wsum > 0 ? (vsum / wsum) : magDb[i];
+        return output;
+      };
+      const s = smoothFactor * 4; // per C++: getWindow(i, smoothing * 4)
+      for (let i = 0; i < N; i++) {
+        const win = getWindow(i, s);
+        let sum = magDb[i];
+        let weightSum = 1.0;
+        for (let j = 1; j < win.length; j++) {
+          const w = win[j];
+          const idxLow = i - j;
+          const idxHigh = i + j;
+          if (idxLow >= 0) { sum += w * magDb[idxLow]; weightSum += w; }
+          if (idxHigh < N) { sum += w * magDb[idxHigh]; weightSum += w; }
+        }
+        out[i] = sum / weightSum;
       }
       return out;
     }
@@ -1080,7 +1193,6 @@ registerProcessor('recorder-processor', RecorderProcessor);
       </div>
       <div class="row" style="margin-top:10px; gap: 10px;">
         <button id="playBtn" class="btn-secondary" type="button">Play Test Signal</button>
-        <span class="muted">Note: Output device selection may require a supported browser and secure context.</span>
       </div>
     </fieldset>
 
@@ -1122,7 +1234,6 @@ registerProcessor('recorder-processor', RecorderProcessor);
           </div>
         </div>
       </div>
-      <div class="muted" style="margin-top:8px;">Click an item to select/deselect. Selected items build the filename using dashes. Empty columns are ignored.</div>
     </fieldset>
 
     <fieldset>
@@ -1145,6 +1256,7 @@ registerProcessor('recorder-processor', RecorderProcessor);
           <input id="smoothSize" type="range" min="0" max="100" step="1" value="0" />
           <span class="muted" id="smoothLabel">0</span>
           <div class="right">
+            <button id="toggleView" class="btn-secondary" type="button">Show Impulse</button>
             <button id="resetView" class="btn-reset" type="button">Reset View</button>
           </div>
         </div>
@@ -1152,8 +1264,6 @@ registerProcessor('recorder-processor', RecorderProcessor);
         <div class="muted" style="margin-top:6px;">Scroll to zoom, click-drag to pan. Log frequency (20 Hz – 24 kHz) and dB scale.</div>
       </div>
     </fieldset>
-
-    <div class="muted">Tip: If device names are blank, click "Initialize / Refresh Devices" and allow microphone access.</div>
   </div>
 </body>
 </html>
