@@ -1023,68 +1023,74 @@ registerProcessor('recorder-processor', RecorderProcessor);
       drawSpectrum();
     }
 
-    // Build a minimum-phase impulse response from log-magnitude response (in dB)
-    // Steps:
-    // 1) Interpolate mag to uniform linear frequency bins up to Nyquist
-    // 2) Convert dB -> linear magnitude; clamp to avoid zeros
-    // 3) Compute log magnitude, Hilbert transform to get minimum-phase
-    // 4) Form complex spectrum: H(w) = |H(w)| * exp(j * phase)
-    // 5) IFFT to time domain and take real part. Normalize length to convenient power of two
+    // Build a minimum-phase impulse response from magnitude (in dB) using C++ minphase() logic
+    // 1) Create full-length log-magnitude vector (symmetric) on a uniform frequency grid
+    // 2) Compute Hilbert transform of log-mag via hilbert_from_scratch (FFT-domain zeroing/doubling)
+    // 3) Combine |H| with phase to form complex spectrum, enforce Hermitian symmetry
+    // 4) IFFT to time domain and normalize
     function buildMinimumPhaseIRFromMag(freqHz, magDb, sampleRate) {
       const nyquist = sampleRate / 2;
       const N = nearestPow2(Math.max(1024, spectrumFftSize));
-      const half = N >> 1;
-      // Uniform frequency grid 0..Nyquist
-      const magLinear = new Float32Array(half + 1);
-      // Interpolate dB magnitudes to linear bins
+      const half = N >>> 1;
+      // Interpolate to uniform bins (0..Nyquist), convert dB->linear
+      const magLinHalf = new Float32Array(half + 1);
       for (let k = 0; k <= half; k++) {
         const f = (k / half) * nyquist;
         const db = interpDbAt(freqHz, magDb, f);
         const lin = Math.pow(10, db / 20);
-        magLinear[k] = Math.max(1e-9, lin);
+        magLinHalf[k] = Math.max(1e-12, lin);
       }
-      // Log magnitude
-      const logMag = new Float32Array(half + 1);
-      for (let k = 0; k <= half; k++) logMag[k] = Math.log(magLinear[k]);
-      // Mirror to full spectrum for real IFFT of log magnitude
-      const re = new Float32Array(N);
-      const im = new Float32Array(N);
-      for (let k = 0; k <= half; k++) re[k] = logMag[k];
-      for (let k = 1; k < half; k++) re[N - k] = logMag[k];
-      // Hilbert transform via FFT: phase = Hilbert{log |H|}
-      fftRadix2(re, im); // FFT
-      // Apply Hilbert transformer: multiply positive freqs by -j, negative freqs by +j, DC and Nyquist -> 0
-      for (let k = 0; k < N; k++) {
-        if (k === 0 || k === half) { re[k] = 0; im[k] = 0; }
-        else if (k < half) { const tr = im[k]; const ti = -re[k]; re[k] = tr; im[k] = ti; }
-        else { const tr = -im[k]; const ti = re[k]; re[k] = tr; im[k] = ti; }
-      }
-      // IFFT to get analytic signal of log |H|
-      ifftRadix2(re, im);
-      // The imaginary part is the minimum-phase angle
-      const phase = new Float32Array(half + 1);
-      for (let k = 0; k <= half; k++) phase[k] = im[k];
-      // Construct complex spectrum H(k) = |H| * e^{j phase}
+      // Build full-length log magnitude (symmetric)
+      const logMagFull = new Float32Array(N);
+      for (let k = 0; k <= half; k++) logMagFull[k] = Math.log(magLinHalf[k]);
+      for (let k = 1; k < half; k++) logMagFull[N - k] = logMagFull[k];
+      // Patch DC and Nyquist if needed (avoid +/-inf per C++)
+      if (!Number.isFinite(logMagFull[0])) logMagFull[0] = -10;
+      if (!Number.isFinite(logMagFull[half])) logMagFull[half] = -10;
+
+      // hilbert_from_scratch on logMagFull -> v (complex); min phase angle = -imag(v)
+      const v = hilbertFromScratch(logMagFull);
+      const minPhaseAngle = new Float32Array(half + 1);
+      for (let k = 0; k <= half; k++) minPhaseAngle[k] = -v.im[k];
+
+      // Construct complex spectrum from |H| and phase
       const Hr = new Float32Array(N);
       const Hi = new Float32Array(N);
       for (let k = 0; k <= half; k++) {
-        const a = magLinear[k];
-        Hr[k] = a * Math.cos(phase[k]);
-        Hi[k] = a * Math.sin(phase[k]);
+        const a = magLinHalf[k];
+        Hr[k] = a * Math.cos(minPhaseAngle[k]);
+        Hi[k] = a * Math.sin(minPhaseAngle[k]);
       }
       // Hermitian symmetry
       for (let k = 1; k < half; k++) {
         Hr[N - k] = Hr[k];
         Hi[N - k] = -Hi[k];
       }
-      // IFFT to time domain
+      // IFFT to time-domain impulse
       ifftRadix2(Hr, Hi);
-      // Take real part, window leading portion to reduce wrap-around, and normalize
       const ir = new Float32Array(N);
       let maxAbs = 1e-12;
       for (let n = 0; n < N; n++) { ir[n] = Hr[n]; maxAbs = Math.max(maxAbs, Math.abs(ir[n])); }
       for (let n = 0; n < N; n++) ir[n] /= maxAbs;
       return ir;
+    }
+
+    // hilbert_from_scratch: compute analytic signal of u via standard FFT method
+    // Zero negative frequencies, double positive (except DC and Nyquist), then IFFT
+    function hilbertFromScratch(u) {
+      const N = u.length;
+      const re = new Float32Array(N);
+      const im = new Float32Array(N);
+      for (let i = 0; i < N; i++) { re[i] = u[i]; im[i] = 0; }
+      fftRadix2(re, im);
+      const half = N >>> 1;
+      // Zero out negative frequencies
+      for (let i = half + 1; i < N; i++) { re[i] = 0; im[i] = 0; }
+      // Double positive frequencies (1..N/2-1)
+      for (let i = 1; i < half; i++) { re[i] *= 2; im[i] *= 2; }
+      // IFFT
+      ifftRadix2(re, im);
+      return { re, im };
     }
 
     function interpDbAt(freqHz, magDb, f) {
@@ -1114,7 +1120,7 @@ registerProcessor('recorder-processor', RecorderProcessor);
 
     // Apply smoothing based on provided C++ algorithm (translated to JS)
     // getWindow(idx, smoothing): raised cosine window whose width grows ~ log2(1+idx) * smoothing
-    function applyFrequencySmoothing(_freq, magDb, smoothFactor) {
+    function applyFrequencySmoothing(freq, magDb, smoothFactor) {
       const N = magDb.length;
       if (!N || smoothFactor <= 0) return magDb;
       const out = new Float32Array(N);
@@ -1130,9 +1136,25 @@ registerProcessor('recorder-processor', RecorderProcessor);
         }
         return output;
       };
-      const s = smoothFactor * 4; // per C++: getWindow(i, smoothing * 4)
+      // Below f0, no smoothing. f0 depends on FFT size.
+      // For 1024/2048/4096 → 50 Hz; 8192 → 30 Hz; 16384 → 25 Hz; 32768 → 20 Hz
+      const f0Lookup = { 1024: 50, 2048: 50, 4096: 50, 8192: 30, 16384: 25, 32768: 20 };
+      const f0 = f0Lookup[spectrumFftSize] ?? 50;
+      const f1 = f0 + 30; // ramp width 30 Hz for a smooth transition
+      const baseS = smoothFactor * 4; // per C++ DoSmooth(getWindow(i, smoothing*4))
       for (let i = 0; i < N; i++) {
-        const win = getWindow(i, s);
+        const f = freq && freq[i] != null ? freq[i] : 0;
+        let sEff = 0;
+        if (f <= f0) sEff = 0;
+        else if (f >= f1) sEff = baseS;
+        else {
+          let t = (f - f0) / (f1 - f0);
+          // smoothstep for seamless transition
+          t = t * t * (3 - 2 * t);
+          sEff = baseS * t;
+        }
+        if (sEff <= 0) { out[i] = magDb[i]; continue; }
+        const win = getWindow(i, sEff);
         let sum = magDb[i];
         let weightSum = 1.0;
         for (let j = 1; j < win.length; j++) {
