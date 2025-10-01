@@ -31,12 +31,15 @@
     label { font-size: 13px; opacity: .9; }
     select, input[type="range"], button { 
       font: inherit; 
-      padding: 6px 8px; 
+      padding: 6px 0px; 
       border-radius: 8px; 
       border: 1px solid rgba(127,127,127,.35);
       background: transparent;
       color: inherit;
     }
+    select, button { 
+        padding: 6px 8px; 
+      }
     select { min-width: 260px; }
     /* Make dropdown text readable: black text on white background, only for selects */
     select { color: #111; background: #fff; }
@@ -79,6 +82,7 @@
 
     // Core state
     let audioContext = null;
+    let requestedSampleRate = 48000;
     let masterGain = null;
     let outputDest = null;           // MediaStreamDestination
     let outputAudioEl = null;         // <audio> that plays outputDest
@@ -227,7 +231,9 @@ registerProcessor('recorder-processor', RecorderProcessor);
     // Initialization
     async function initAudioIfNeeded() {
       if (initialized) return;
-      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const opts = {};
+      if (requestedSampleRate) opts.sampleRate = requestedSampleRate;
+      audioContext = new (window.AudioContext || window.webkitAudioContext)(opts);
       // Load worklets
       await audioContext.audioWorklet.addModule(makeWorkletURL(generatorWorkletCode));
       await audioContext.audioWorklet.addModule(makeWorkletURL(recorderWorkletCode));
@@ -572,6 +578,21 @@ registerProcessor('recorder-processor', RecorderProcessor);
       $('#signalType').addEventListener('change', configureGenerator);
       $('#volume').addEventListener('input', () => { if (masterGain) masterGain.gain.value = parseFloat($('#volume').value); });
       $('#inputDevice').addEventListener('change', async (e) => { await initAudioIfNeeded(); localStorage.setItem('ca-selected-input', e.target.value || ''); await startInput(e.target.value); });
+      $('#sampleRateSel').addEventListener('change', async (e) => {
+        const val = parseInt(e.target.value, 10) || 48000;
+        requestedSampleRate = val;
+        localStorage.setItem('ca-sr', String(val));
+        // Recreate audio graph with new context at next init
+        if (audioContext) {
+          try { await audioContext.close(); } catch {}
+          initialized = false;
+          audioContext = null; masterGain = null; outputDest = null; generatorNode = null; recorderNode = null; outputAudioEl = null;
+        }
+        await initAudioIfNeeded();
+        await refreshDevices();
+        await applyOutputSink();
+        setStatus(`Sample rate set to ${val} Hz.`);
+      });
       $('#outputDevice').addEventListener('change', async (e) => { await initAudioIfNeeded(); localStorage.setItem('ca-selected-output', e.target.value || ''); await applyOutputSink(); });
       if (navigator.mediaDevices) navigator.mediaDevices.addEventListener('devicechange', refreshDevices);
 
@@ -635,6 +656,13 @@ registerProcessor('recorder-processor', RecorderProcessor);
       // Attempt to init devices proactively; if permission blocked, user can press Initialize
       (async () => {
         try {
+          // restore requested sample rate
+          const savedSr = parseInt(localStorage.getItem('ca-sr') || '48000', 10);
+          if ([44100,48000,96000].includes(savedSr)) {
+            requestedSampleRate = savedSr;
+            const srSel = document.getElementById('sampleRateSel');
+            if (srSel) srSel.value = String(savedSr);
+          }
           await initAudioIfNeeded();
           await ensureDeviceAccess();
           await refreshDevices();
@@ -1223,6 +1251,12 @@ registerProcessor('recorder-processor', RecorderProcessor);
       <div class="row">
         <label for="inputDevice">Input</label>
         <select id="inputDevice"></select>
+        <label for="sampleRateSel">Sample rate</label>
+        <select id="sampleRateSel">
+          <option value="44100">44,100 Hz</option>
+          <option value="48000" selected>48,000 Hz</option>
+          <option value="96000">96,000 Hz</option>
+        </select>
         <div class="spacer"></div>
         <button id="initBtn" class="btn-secondary" type="button">Initialize / Refresh Devices</button>
       </div>
