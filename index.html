@@ -113,6 +113,8 @@
     let isPanning = false;
     let panStart = null;
     let showImpulse = false; // false = spectrum view, true = impulse response view
+    let specBackup = { xMin: 20, xMax: 24000, yMin: -120, yMax: 0 };
+    let impLastLength = 0;
 
     // Capability checks
     const canSelectOutput = () => typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
@@ -444,30 +446,13 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const finalBuf = finalSamples === recordTargetSamples ? recordBuffer : recordBuffer.slice(0, finalSamples);
 
       // Encode and download
+      // No auto-save; keep samples for spectrum/IR only
       const wavBlob = encodeWav24(finalBuf, audioContext.sampleRate);
-      // Save samples for spectrum
       spectrumSamples = finalBuf;
       drawSpectrum();
-      const base = buildFilenameBase();
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      const fname = `${base || `capture_${ts}`}.wav`;
-      const url = URL.createObjectURL(wavBlob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fname;
-      document.body.appendChild(a);
-      const beforeSize = performance.now();
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
-      // Delay status update slightly to reduce chance of showing when user cancels
-      setTimeout(() => {
-        // We cannot reliably detect cancel, so only show a neutral message
-        setStatus(`Export prepared: ${fname}`);
-      }, 200);
 
       $('#recordBtn').disabled = false;
-      // No success message; neutral info is set above after triggering download
+      setStatus('Capture completed.');
       updatePlayButtonLabel();
     }
 
@@ -531,6 +516,50 @@ registerProcessor('recorder-processor', RecorderProcessor);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
+    function exportSpectrumFile() {
+      if (!spectrumSamples || !audioContext) { setStatus('Nothing to export. Perform a capture first.'); return; }
+      const sr = audioContext.sampleRate | 0;
+      let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
+      const smoothSlider = document.getElementById('smoothSize');
+      const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
+      if (smoothFactor > 0) magDb = applyFrequencySmoothing(freq, magDb, smoothFactor);
+      // Convert dB to magnitude: y = 10^(x/20), and write each point on its own line with CRLF
+      const header = String(sr);
+      const lines = [header];
+      for (let i = 0; i < magDb.length; i++) {
+        const db = Number.isFinite(magDb[i]) ? magDb[i] : 0;
+        const mag = Math.pow(10, db / 20);
+        lines.push(mag.toFixed(8));
+      }
+      const content = lines.join("\r\n");
+      const blob = new Blob([content], { type: 'text/plain' });
+      const base = buildFilenameBase();
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const name = `${base || 'spectrum'}_${ts}.spectrum`;
+      triggerDownload(blob, name);
+      setStatus(`Exported spectrum: ${name}`);
+    }
+
+    function exportImpulseResponse() {
+      if (!spectrumSamples || !audioContext) { setStatus('Nothing to export. Perform a capture first.'); return; }
+      const sr = audioContext.sampleRate | 0;
+      let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
+      const smoothSlider = document.getElementById('smoothSize');
+      const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
+      if (smoothFactor > 0) magDb = applyFrequencySmoothing(freq, magDb, smoothFactor);
+      const ir = buildMinimumPhaseIRFromMag(freq, magDb, sr);
+      // Normalize IR before export
+      let maxAbs = 1e-12; for (let i = 0; i < ir.length; i++) maxAbs = Math.max(maxAbs, Math.abs(ir[i]));
+      const norm = 1 / maxAbs; const irNorm = new Float32Array(ir.length);
+      for (let i = 0; i < ir.length; i++) irNorm[i] = ir[i] * norm;
+      const blob = encodeWav24(irNorm, sr);
+      const base = buildFilenameBase();
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const name = `${base || 'impulse'}_${ts}.wav`;
+      triggerDownload(blob, name);
+      setStatus(`Exported IR: ${name}`);
     }
 
     function setStatus(text) {
@@ -645,8 +674,20 @@ registerProcessor('recorder-processor', RecorderProcessor);
       document.getElementById('toggleView').addEventListener('click', () => {
         showImpulse = !showImpulse;
         document.getElementById('toggleView').textContent = showImpulse ? 'Show Spectrum' : 'Show Impulse';
+        if (showImpulse) {
+          // Switch to impulse-specific view ranges (time in samples on X, normalized amplitude on Y)
+          specBackup = { xMin: viewXMin, xMax: viewXMax, yMin: viewYMin, yMax: viewYMax };
+          viewXMin = 0; viewXMax = 1; // relative [0,1] across canvas width for impulse
+          viewYMin = -1; viewYMax = 1;
+        } else {
+          // Restore spectrum view ranges
+          viewXMin = specBackup.xMin; viewXMax = specBackup.xMax;
+          viewYMin = specBackup.yMin; viewYMax = specBackup.yMax;
+        }
         drawSpectrum();
       });
+      document.getElementById('exportIR').addEventListener('click', () => exportImpulseResponse());
+      document.getElementById('exportSpectrum').addEventListener('click', () => exportSpectrumFile());
 
       initSpectrumCanvasInteractions();
     }
@@ -906,7 +947,7 @@ registerProcessor('recorder-processor', RecorderProcessor);
         }
         ctx.stroke();
       } else {
-        // Time-domain impulse response (minimum-phase) view
+        // Time-domain impulse response (minimum-phase) view with shared pan/zoom (linear axes)
         if (!spectrumSamples) { ctx.restore(); return; }
         const sr = audioContext ? audioContext.sampleRate : 48000;
         let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
@@ -915,15 +956,18 @@ registerProcessor('recorder-processor', RecorderProcessor);
         if (smoothFactor > 0) { magDb = applyFrequencySmoothing(freq, magDb, smoothFactor); }
         // Build minimum-phase impulse from magnitude response
         const ir = buildMinimumPhaseIRFromMag(freq, magDb, sr);
-        // Draw impulse normalized
         const N = ir.length;
-        let maxAbs = 1e-9;
-        for (let i = 0; i < N; i++) maxAbs = Math.max(maxAbs, Math.abs(ir[i]));
+        // Prepare view ranges if switching or length changed
+        if (impLastLength !== N) { impLastLength = N; viewXMin = 0; viewXMax = N - 1; }
+        let maxAbs = 1e-9; for (let i = 0; i < N; i++) maxAbs = Math.max(maxAbs, Math.abs(ir[i]));
         ctx.strokeStyle = '#60a5fa';
         ctx.beginPath();
         for (let i = 0; i < N; i++) {
-          const x = i / (N - 1) * width;
-          const y = height / 2 - (ir[i] / maxAbs) * (height * 0.45);
+          // map x using linear domain [viewXMin, viewXMax]
+          const x = mapLinear(i, viewXMin, viewXMax, 0, width);
+          // map y using linear domain [viewYMin, viewYMax]
+          const yVal = (ir[i] / maxAbs);
+          const y = mapLinear(yVal, viewYMax, viewYMin, 0, height);
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
         ctx.stroke();
@@ -936,23 +980,41 @@ registerProcessor('recorder-processor', RecorderProcessor);
       ctx.strokeStyle = 'rgba(255,255,255,0.08)';
       ctx.fillStyle = 'rgba(229,231,235,0.7)';
       ctx.lineWidth = 1;
-      // dB grid lines
-      const step = 10;
-      const startDb = Math.ceil(viewYMin / step) * step;
-      for (let db = startDb; db <= viewYMax; db += step) {
-        const y = mapLinear(db, viewYMax, viewYMin, 0, height);
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-        ctx.fillText(`${db} dB`, 4, Math.max(0, y - 12));
+      if (!showImpulse) {
+        // dB grid lines
+        const step = 10;
+        const startDb = Math.ceil(viewYMin / step) * step;
+        for (let db = startDb; db <= viewYMax; db += step) {
+          const y = mapLinear(db, viewYMax, viewYMin, 0, height);
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+          ctx.fillText(`${db} dB`, 4, Math.max(0, y - 12));
+        }
+        // Frequency lines
+        const freqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+        freqs.forEach(f => {
+          if (f < viewXMin || f > viewXMax) return;
+          const x = mapLog(f, viewXMin, viewXMax, 0, width);
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+          const label = f >= 1000 ? `${(f/1000)}k` : `${f}`;
+          ctx.fillText(`${label} Hz`, Math.min(width - 60, x + 4), 2);
+        });
+      } else {
+        // Impulse view grid: linear amplitude lines and sample index ticks
+        const ampStep = 0.2;
+        for (let a = -1; a <= 1.0001; a += ampStep) {
+          const y = mapLinear(a, viewYMax, viewYMin, 0, height);
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+          ctx.fillText(`${a.toFixed(1)}`, 4, Math.max(0, y - 12));
+        }
+        // X ticks every ~10% of span
+        const span = Math.max(1, viewXMax - viewXMin);
+        const step = Math.max(1, Math.floor(span / 10));
+        for (let xv = Math.ceil(viewXMin / step) * step; xv <= viewXMax; xv += step) {
+          const x = mapLinear(xv, viewXMin, viewXMax, 0, width);
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+          ctx.fillText(`${Math.round(xv)}`, Math.min(width - 40, x + 4), 2);
+        }
       }
-      // Frequency lines
-      const freqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
-      freqs.forEach(f => {
-        if (f < viewXMin || f > viewXMax) return;
-        const x = mapLog(f, viewXMin, viewXMax, 0, width);
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
-        const label = f >= 1000 ? `${(f/1000)}k` : `${f}`;
-        ctx.fillText(`${label} Hz`, Math.min(width - 60, x + 4), 2);
-      });
       ctx.restore();
     }
 
@@ -999,36 +1061,67 @@ registerProcessor('recorder-processor', RecorderProcessor);
     }
 
     function panView(dx, dy, width, height) {
-      // Horizontal pan in log domain
-      const logMin = Math.log10(viewXMin);
-      const logMax = Math.log10(viewXMax);
-      const logSpan = logMax - logMin;
-      const shift = -dx / width * logSpan;
-      const newLogMin = logMin + shift;
-      const newLogMax = logMax + shift;
-      let newXMin = Math.pow(10, newLogMin);
-      let newXMax = Math.pow(10, newLogMax);
-      if (newXMin >= 10 && newXMax <= 48000) {
-        viewXMin = newXMin;
-        viewXMax = newXMax;
+      if (showImpulse) {
+        // Linear pan for impulse view (samples domain)
+        const span = viewXMax - viewXMin;
+        const shift = -dx / width * span;
+        let newXMin = viewXMin + shift;
+        let newXMax = viewXMax + shift;
+        const maxX = Math.max(1, impLastLength - 1);
+        if (newXMin < 0) { newXMax -= newXMin; newXMin = 0; }
+        if (newXMax > maxX) { const diff = newXMax - maxX; newXMin -= diff; newXMax = maxX; if (newXMin < 0) newXMin = 0; }
+        viewXMin = newXMin; viewXMax = newXMax;
+        // Vertical pan linear amplitude
+        const ampSpan = viewYMax - viewYMin;
+        const ampShift = dy / height * ampSpan;
+        viewYMin += ampShift; viewYMax += ampShift;
+      } else {
+        // Log-frequency pan for spectrum view
+        const logMin = Math.log10(viewXMin);
+        const logMax = Math.log10(viewXMax);
+        const logSpan = logMax - logMin;
+        const shift = -dx / width * logSpan;
+        const newLogMin = logMin + shift;
+        const newLogMax = logMax + shift;
+        let newXMin = Math.pow(10, newLogMin);
+        let newXMax = Math.pow(10, newLogMax);
+        if (newXMin >= 10 && newXMax <= 48000) {
+          viewXMin = newXMin;
+          viewXMax = newXMax;
+        }
+        // Vertical pan linear in dB
+        const dBSpan = viewYMax - viewYMin;
+        const dBShift = dy / height * dBSpan;
+        viewYMin += dBShift;
+        viewYMax += dBShift;
       }
-      // Vertical pan linear in dB
-      const dBSpan = viewYMax - viewYMin;
-      const dBShift = dy / height * dBSpan;
-      viewYMin += dBShift;
-      viewYMax += dBShift;
     }
 
     function zoomViewX(scale, px, width) {
-      const logMin = Math.log10(viewXMin);
-      const logMax = Math.log10(viewXMax);
-      const t = px / width;
-      const center = logMin + t * (logMax - logMin);
-      const newSpan = (logMax - logMin) * scale;
-      const newLogMin = center - t * newSpan;
-      const newLogMax = center + (1 - t) * newSpan;
-      viewXMin = Math.max(10, Math.pow(10, newLogMin));
-      viewXMax = Math.min(48000, Math.pow(10, newLogMax));
+      if (showImpulse) {
+        const t = px / width;
+        const span = viewXMax - viewXMin;
+        const center = viewXMin + t * span;
+        const newSpan = span * scale;
+        let newMin = center - t * newSpan;
+        let newMax = center + (1 - t) * newSpan;
+        const maxX = Math.max(1, impLastLength - 1);
+        if (newMin < 0) { newMax -= newMin; newMin = 0; }
+        if (newMax > maxX) { const diff = newMax - maxX; newMin -= diff; newMax = maxX; if (newMin < 0) newMin = 0; }
+        // Prevent collapse
+        if (newMax - newMin < 1) { newMin = Math.max(0, center - 0.5); newMax = Math.min(maxX, center + 0.5); }
+        viewXMin = newMin; viewXMax = newMax;
+      } else {
+        const logMin = Math.log10(viewXMin);
+        const logMax = Math.log10(viewXMax);
+        const t = px / width;
+        const center = logMin + t * (logMax - logMin);
+        const newSpan = (logMax - logMin) * scale;
+        const newLogMin = center - t * newSpan;
+        const newLogMax = center + (1 - t) * newSpan;
+        viewXMin = Math.max(10, Math.pow(10, newLogMin));
+        viewXMax = Math.min(48000, Math.pow(10, newLogMax));
+      }
     }
 
     function zoomViewY(scale, py, height) {
@@ -1040,14 +1133,27 @@ registerProcessor('recorder-processor', RecorderProcessor);
     }
 
     function resetSpectrumView() {
-      viewXMin = 20;
-      viewXMax = 24000;
-      viewYMin = -120;
-      viewYMax = 0;
-      const fftSlider = document.getElementById('fftSize');
-      const fftLabel = document.getElementById('fftLabel');
-      if (fftSlider && fftLabel) { fftSlider.value = String(spectrumFftSize); fftLabel.textContent = String(spectrumFftSize); }
-      // Redraw immediately so the change is visible without extra interaction
+      if (showImpulse) {
+        // Reset to fit full impulse length and amplitude nicely
+        const sr = audioContext ? audioContext.sampleRate : 48000;
+        let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
+        const smoothSlider = document.getElementById('smoothSize');
+        const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
+        if (smoothFactor > 0) { magDb = applyFrequencySmoothing(freq, magDb, smoothFactor); }
+        const ir = buildMinimumPhaseIRFromMag(freq, magDb, sr);
+        impLastLength = ir.length;
+        viewXMin = 0; viewXMax = Math.max(1, impLastLength - 1);
+        // Compute amplitude range and add 10% headroom
+        let maxAbs = 1e-9; for (let i = 0; i < ir.length; i++) maxAbs = Math.max(maxAbs, Math.abs(ir[i]));
+        const margin = maxAbs * 1.1;
+        viewYMin = -margin; viewYMax = margin;
+      } else {
+        // Reset spectrum axes only (leave FFT slider untouched)
+        viewXMin = 20;
+        viewXMax = 24000;
+        viewYMin = -120;
+        viewYMax = 0;
+      }
       drawSpectrum();
     }
 
@@ -1293,10 +1399,9 @@ registerProcessor('recorder-processor', RecorderProcessor);
     </fieldset>
 
     <fieldset>
-      <legend>Record</legend>
+      <legend>Capture</legend>
       <div class="row" style="gap: 10px;">
-        <button id="recordBtn" class="btn-primary" type="button">Record (5s, 24-bit WAV)</button>
-        <span class="muted">Starts signal, waits 0.5s, records 5s mono, then saves.</span>
+        <button id="recordBtn" class="btn-primary" type="button">Capture (5s, 24-bit WAV)</button>
       </div>
       <div class="status" id="status"></div>
     </fieldset>
@@ -1312,6 +1417,8 @@ registerProcessor('recorder-processor', RecorderProcessor);
           <input id="smoothSize" type="range" min="0" max="100" step="1" value="0" />
           <span class="muted" id="smoothLabel">0</span>
           <div class="right">
+            <button id="exportSpectrum" class="btn-secondary" type="button">Export Spectrum</button>
+            <button id="exportIR" class="btn-secondary" type="button">Export IR</button>
             <button id="toggleView" class="btn-secondary" type="button">Show Impulse</button>
             <button id="resetView" class="btn-reset" type="button">Reset View</button>
           </div>
