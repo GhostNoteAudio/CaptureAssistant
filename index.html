@@ -136,6 +136,8 @@
 
     // Capability checks
     const canSelectOutput = () => typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
+    // Cache of input device info by id for validation and heuristics
+    let inputDeviceInfoById = {};
 
     // Worklet code (inline via Blob URLs to keep single-file)
     function makeWorkletURL(code) {
@@ -312,11 +314,13 @@ registerProcessor('recorder-processor', RecorderProcessor);
 
       // Populate input devices
       inputSel.innerHTML = '';
+      inputDeviceInfoById = {};
       for (const d of inputs) {
         const opt = document.createElement('option');
         opt.value = d.deviceId;
         opt.textContent = d.label || `Input ${inputSel.length + 1}`;
         inputSel.appendChild(opt);
+        inputDeviceInfoById[d.deviceId] = d;
       }
       if (inputs.length === 0) {
         const opt = document.createElement('option');
@@ -361,22 +365,79 @@ registerProcessor('recorder-processor', RecorderProcessor);
     // Input stream setup
     async function startInput(deviceId) {
       stopInput();
-      const constraints = {
+      const selectedInfo = deviceId ? inputDeviceInfoById[deviceId] : null;
+      const expectedLabel = (selectedInfo?.label || '').toLowerCase();
+      const looksLikeUsb = /usb/.test(expectedLabel);
+
+      // Build a few increasingly-permissive constraint variants and try them in order.
+      const buildConstraintsPrimary = () => ({
         audio: {
           deviceId: deviceId ? { exact: deviceId } : undefined,
-          channelCount: 1,
+          // Prefer stereo for USB, but don't force it hard (ideal). Many Android paths downmix anyway.
+          channelCount: looksLikeUsb ? { ideal: 2 } : { ideal: 1 },
+          sampleRate: requestedSampleRate || (looksLikeUsb ? 48000 : undefined),
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false
         }
-      };
-      try {
-        inputStream = await navigator.mediaDevices.getUserMedia(constraints);
-        inputSourceNode = audioContext.createMediaStreamSource(inputStream);
-        inputSourceNode.connect(recorderNode);
-      } catch (err) {
-        setStatus(`Failed to access input device: ${err?.message || err}`);
+      });
+
+      const buildConstraintsFallback1 = () => ({
+        // Legacy/Chrome-specific fallback that sometimes works on Android when exact deviceId is ignored
+        audio: {
+          optional: deviceId ? [ { sourceId: deviceId } ] : [],
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        }
+      });
+
+      const buildConstraintsFallback2 = () => ({
+        audio: {
+          // Try without any channel/sample hints, but keep exact deviceId
+          deviceId: deviceId ? { exact: deviceId } : undefined,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        }
+      });
+
+      async function tryGet(constraints) {
+        const s = await navigator.mediaDevices.getUserMedia(constraints);
+        // Validate that we actually got the intended device if we know its label
+        const track = s.getAudioTracks()[0];
+        const gotLabel = (track?.label || '').toLowerCase();
+        if (deviceId && expectedLabel && gotLabel && !gotLabel.includes(expectedLabel)) {
+          // Not the device we expected; reject so we can try a fallback
+          try { s.getTracks().forEach(t => t.stop()); } catch {}
+          throw new Error(`Selected device mismatch (got "${track?.label || 'unknown'}")`);
+        }
+        return s;
       }
+      try {
+        // Try primary constraints
+        inputStream = await tryGet(buildConstraintsPrimary());
+      } catch (err1) {
+        try {
+          // Try legacy optional:sourceId fallback
+          inputStream = await tryGet(buildConstraintsFallback1());
+        } catch (err2) {
+          try {
+            // Try minimal exact-only
+            inputStream = await tryGet(buildConstraintsFallback2());
+          } catch (err3) {
+            setStatus(`Failed to access input device: ${(err3?.message || err2?.message || err1?.message || err3)}`);
+            return;
+          }
+        }
+      }
+      inputSourceNode = audioContext.createMediaStreamSource(inputStream);
+      inputSourceNode.connect(recorderNode);
+      try {
+        const track = inputStream.getAudioTracks()[0];
+        const label = track?.label || 'Unknown input device';
+        setStatus(`Input device in use: ${label}`);
+      } catch {}
     }
 
     function stopInput() {
@@ -645,7 +706,10 @@ registerProcessor('recorder-processor', RecorderProcessor);
       $('#recordBtn').addEventListener('click', onRecordClick);
       $('#playBtn').addEventListener('click', onPlayToggleClick);
       $('#signalType').addEventListener('change', configureGenerator);
-      $('#volume').addEventListener('input', () => { if (masterGain) masterGain.gain.value = parseFloat($('#volume').value); });
+      $('#volume').addEventListener('input', () => {
+        if (masterGain) masterGain.gain.value = parseFloat($('#volume').value);
+        try { localStorage.setItem('ca-volume', String($('#volume').value)); } catch {}
+      });
       $('#inputDevice').addEventListener('change', async (e) => { await initAudioIfNeeded(); localStorage.setItem('ca-selected-input', e.target.value || ''); await startInput(e.target.value); });
       $('#sampleRateSel').addEventListener('change', async (e) => {
         const val = parseInt(e.target.value, 10) || 48000;
@@ -696,6 +760,13 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const fftSlider = document.getElementById('fftSize');
       const fftLabel = document.getElementById('fftLabel');
       const fftOptions = [1024, 2048, 4096, 8192, 16384, 32768];
+      // restore saved fft index if present
+      try {
+        const savedFftIdx = parseInt(localStorage.getItem('ca-fft-index') || '', 10);
+        if (!Number.isNaN(savedFftIdx) && savedFftIdx >= 0 && savedFftIdx < fftOptions.length) {
+          fftSlider.value = String(savedFftIdx);
+        }
+      } catch {}
       fftLabel.textContent = String(fftOptions[parseInt(fftSlider.value, 10)]);
       spectrumFftSize = fftOptions[parseInt(fftSlider.value, 10)];
       fftSlider.addEventListener('input', () => {
@@ -703,23 +774,48 @@ registerProcessor('recorder-processor', RecorderProcessor);
         spectrumFftSize = fftOptions[idx];
         fftLabel.textContent = String(spectrumFftSize);
         drawSpectrum();
+        try { localStorage.setItem('ca-fft-index', String(idx)); } catch {}
       });
       const smoothSlider = document.getElementById('smoothSize');
       const smoothLabel = document.getElementById('smoothLabel');
+      try {
+        const savedSmooth = parseInt(localStorage.getItem('ca-smooth') || '', 10);
+        if (!Number.isNaN(savedSmooth) && savedSmooth >= parseInt(smoothSlider.min, 10) && savedSmooth <= parseInt(smoothSlider.max, 10)) {
+          smoothSlider.value = String(savedSmooth);
+        }
+      } catch {}
+      smoothLabel.textContent = String(smoothSlider.value);
       smoothSlider.addEventListener('input', () => {
         smoothLabel.textContent = String(smoothSlider.value);
         drawSpectrum();
+        try { localStorage.setItem('ca-smooth', String(smoothSlider.value)); } catch {}
       });
       const irSizeSlider = document.getElementById('irSize');
       const irSizeLabel = document.getElementById('irSizeLabel');
       const irSizeOpts = [1024, 2048, 4096, 8192];
+      try {
+        const savedIrIdx = parseInt(localStorage.getItem('ca-ir-index') || '', 10);
+        if (!Number.isNaN(savedIrIdx) && savedIrIdx >= 0 && savedIrIdx < irSizeOpts.length) {
+          irSizeSlider.value = String(savedIrIdx);
+        }
+      } catch {}
       irSizeLabel.textContent = String(irSizeOpts[parseInt(irSizeSlider.value, 10)]);
       irSizeSlider.addEventListener('input', () => {
         const idx = Math.max(0, Math.min(irSizeOpts.length - 1, parseInt(irSizeSlider.value, 10) || 0));
         irSizeLabel.textContent = String(irSizeOpts[idx]);
         drawSpectrum();
+        try { localStorage.setItem('ca-ir-index', String(idx)); } catch {}
       });
       irSizeSlider.addEventListener('change', () => { drawSpectrum(); });
+      // Restore saved volume last, so initAudio can pick it up
+      try {
+        const savedVol = localStorage.getItem('ca-volume');
+        if (savedVol != null) {
+          const volEl = document.getElementById('volume');
+          volEl.value = String(savedVol);
+          if (masterGain) masterGain.gain.value = parseFloat(volEl.value);
+        }
+      } catch {}
       document.getElementById('resetView').addEventListener('click', () => resetSpectrumView());
       document.getElementById('toggleView').addEventListener('click', () => {
         showImpulse = !showImpulse;
