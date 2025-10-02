@@ -550,19 +550,8 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
       if (smoothFactor > 0) magDb = applyFrequencySmoothing(freq, magDb, smoothFactor);
       const ir = buildMinimumPhaseIRFromMag(freq, magDb, sr);
-      // Truncate and apply cosine window to tail per requested IR size
-      const irSizeOpts = [1024, 2048, 4096, 8192];
-      const irSizeIdx = parseInt((document.getElementById('irSize').value), 10);
-      const irLength = irSizeOpts[Math.max(0, Math.min(irSizeOpts.length - 1, irSizeIdx))];
-      const truncated = new Float32Array(irLength);
-      const copyLen = Math.min(irLength, ir.length);
-      for (let i = 0; i < copyLen; i++) truncated[i] = ir[i];
-      const windowStart = Math.floor(irLength * 0.9);
-      const windowLength = Math.max(1, irLength - windowStart);
-      for (let i = windowStart; i < irLength; i++) {
-        const t = (i - windowStart) / windowLength;
-        truncated[i] *= Math.cos(t * Math.PI / 2);
-      }
+      const irLength = getSelectedIrLength();
+      const truncated = truncateAndWindowIR(ir, irLength);
       // Normalize before export
       let maxAbs = 1e-12; for (let i = 0; i < irLength; i++) maxAbs = Math.max(maxAbs, Math.abs(truncated[i]));
       const norm = 1 / maxAbs; for (let i = 0; i < irLength; i++) truncated[i] *= norm;
@@ -572,6 +561,27 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const name = `${base || 'impulse'}_${ts}.wav`;
       triggerDownload(blob, name);
       setStatus(`Exported IR: ${name}`);
+    }
+
+    function getSelectedIrLength() {
+      const irSizeOpts = [1024, 2048, 4096, 8192];
+      const slider = document.getElementById('irSize');
+      const idx = Math.max(0, Math.min(irSizeOpts.length - 1, parseInt(slider.value, 10)));
+      return irSizeOpts[idx];
+    }
+
+    function truncateAndWindowIR(irFull, irLength) {
+      const N = Math.max(1, irLength | 0);
+      const out = new Float32Array(N);
+      const copyLen = Math.min(N, irFull.length);
+      for (let i = 0; i < copyLen; i++) out[i] = irFull[i];
+      const windowStart = Math.floor(N * 0.9);
+      const windowLength = Math.max(1, N - windowStart);
+      for (let i = windowStart; i < N; i++) {
+        const t = (i - windowStart) / windowLength;
+        out[i] *= Math.cos(t * Math.PI / 2);
+      }
+      return out;
     }
 
     function setStatus(text) {
@@ -974,8 +984,10 @@ registerProcessor('recorder-processor', RecorderProcessor);
         const smoothSlider = document.getElementById('smoothSize');
         const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
         if (smoothFactor > 0) { magDb = applyFrequencySmoothing(freq, magDb, smoothFactor); }
-        // Build minimum-phase impulse from magnitude response
-        const ir = buildMinimumPhaseIRFromMag(freq, magDb, sr);
+        // Build minimum-phase impulse and apply IR Size truncation and windowing
+        const irFull = buildMinimumPhaseIRFromMag(freq, magDb, sr);
+        const irLength = getSelectedIrLength();
+        const ir = truncateAndWindowIR(irFull, irLength);
         const N = ir.length;
         // Prepare view ranges if switching or length changed
         if (impLastLength !== N) { impLastLength = N; viewXMin = 0; viewXMax = N - 1; }
