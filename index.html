@@ -73,12 +73,14 @@
     .btn-reset { background: #475569; color: #fff; border-color: #334155; }
     .col-name { cursor: text; }
     /* Layout adjustments */
-    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
-    .form-vertical { display: flex; flex-direction: column; gap: 12px; }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch; }
+    .two-col fieldset { display: flex; flex-direction: column; height: 100%; }
+    .form-vertical { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; }
     .form-row { display: flex; flex-direction: column; gap: 6px; }
     .form-row label { font-size: 13px; opacity: .9; }
     .form-row select, .form-row input[type="range"], .form-row button { width: 100%; max-width: 380px; }
-    .form-actions { display: flex; gap: 10px; }
+    .form-actions { display: flex; gap: 10px; margin-top: auto; }
+    .form-actions.input-actions { padding-top: 18px; }
     /* Filename builder adders aligned bottom */
     .adder-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-top: 12px; }
     .adder-row .adder { display: flex; gap: 8px; }
@@ -86,7 +88,7 @@
     /* Spectrum controls */
     .spectrum-toolbar { display: flex; flex-direction: column; gap: 10px; }
     .spectrum-controls { display: grid; grid-template-columns: auto 1fr auto auto 1fr auto auto 1fr auto; gap: 10px; align-items: center; }
-    .spectrum-controls input[type="range"] { width: 280px; }
+    .spectrum-controls input[type="range"] { width: 220px; }
     .spectrum-actions { display: flex; gap: 10px; }
   </style>
   <meta http-equiv="origin-trial" content="">
@@ -1377,7 +1379,7 @@ registerProcessor('recorder-processor', RecorderProcessor);
 </head>
 <body>
   <div class="wrap">
-    <h1>Capture Assistant</h1>
+    <h1>IR Capture Assistant</h1>
 
     <div class="two-col">
       <fieldset>
@@ -1420,7 +1422,7 @@ registerProcessor('recorder-processor', RecorderProcessor);
               <option value="96000">96,000 Hz</option>
             </select>
           </div>
-          <div class="form-actions">
+          <div class="form-actions input-actions">
             <button id="initBtn" class="btn-secondary" type="button">Initialize / Refresh Devices</button>
           </div>
         </div>
