@@ -550,11 +550,23 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
       if (smoothFactor > 0) magDb = applyFrequencySmoothing(freq, magDb, smoothFactor);
       const ir = buildMinimumPhaseIRFromMag(freq, magDb, sr);
-      // Normalize IR before export
-      let maxAbs = 1e-12; for (let i = 0; i < ir.length; i++) maxAbs = Math.max(maxAbs, Math.abs(ir[i]));
-      const norm = 1 / maxAbs; const irNorm = new Float32Array(ir.length);
-      for (let i = 0; i < ir.length; i++) irNorm[i] = ir[i] * norm;
-      const blob = encodeWav24(irNorm, sr);
+      // Truncate and apply cosine window to tail per requested IR size
+      const irSizeOpts = [1024, 2048, 4096, 8192];
+      const irSizeIdx = parseInt((document.getElementById('irSize').value), 10);
+      const irLength = irSizeOpts[Math.max(0, Math.min(irSizeOpts.length - 1, irSizeIdx))];
+      const truncated = new Float32Array(irLength);
+      const copyLen = Math.min(irLength, ir.length);
+      for (let i = 0; i < copyLen; i++) truncated[i] = ir[i];
+      const windowStart = Math.floor(irLength * 0.9);
+      const windowLength = Math.max(1, irLength - windowStart);
+      for (let i = windowStart; i < irLength; i++) {
+        const t = (i - windowStart) / windowLength;
+        truncated[i] *= Math.cos(t * Math.PI / 2);
+      }
+      // Normalize before export
+      let maxAbs = 1e-12; for (let i = 0; i < irLength; i++) maxAbs = Math.max(maxAbs, Math.abs(truncated[i]));
+      const norm = 1 / maxAbs; for (let i = 0; i < irLength; i++) truncated[i] *= norm;
+      const blob = encodeWav24(truncated, sr);
       const base = buildFilenameBase();
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       const name = `${base || 'impulse'}_${ts}.wav`;
@@ -669,6 +681,14 @@ registerProcessor('recorder-processor', RecorderProcessor);
       smoothSlider.addEventListener('input', () => {
         smoothLabel.textContent = String(smoothSlider.value);
         drawSpectrum();
+      });
+      const irSizeSlider = document.getElementById('irSize');
+      const irSizeLabel = document.getElementById('irSizeLabel');
+      const irSizeOpts = [1024, 2048, 4096, 8192];
+      irSizeLabel.textContent = String(irSizeOpts[parseInt(irSizeSlider.value, 10)]);
+      irSizeSlider.addEventListener('input', () => {
+        const idx = Math.max(0, Math.min(irSizeOpts.length - 1, parseInt(irSizeSlider.value, 10) || 0));
+        irSizeLabel.textContent = String(irSizeOpts[idx]);
       });
       document.getElementById('resetView').addEventListener('click', () => resetSpectrumView());
       document.getElementById('toggleView').addEventListener('click', () => {
@@ -1416,6 +1436,9 @@ registerProcessor('recorder-processor', RecorderProcessor);
           <label for="smoothSize" style="margin-left:10px;">Smoothing</label>
           <input id="smoothSize" type="range" min="0" max="100" step="1" value="0" />
           <span class="muted" id="smoothLabel">0</span>
+          <label for="irSize" style="margin-left:10px;">IR Size</label>
+          <input id="irSize" type="range" min="0" max="3" step="1" value="2" />
+          <span class="muted" id="irSizeLabel">4096</span>
           <div class="right">
             <button id="exportSpectrum" class="btn-secondary" type="button">Export Spectrum</button>
             <button id="exportIR" class="btn-secondary" type="button">Export IR</button>
