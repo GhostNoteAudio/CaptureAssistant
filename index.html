@@ -432,9 +432,52 @@ registerProcessor('recorder-processor', RecorderProcessor);
         }
       }
       inputSourceNode = audioContext.createMediaStreamSource(inputStream);
-      inputSourceNode.connect(recorderNode);
+
+      // Inspect channel count and route to mono based on selection
+      const chanSelect = document.getElementById('inputChannel');
+      const chanMode = chanSelect ? chanSelect.value : 'auto';
+      const track = inputStream.getAudioTracks()[0];
+      const settings = track.getSettings ? track.getSettings() : {};
+      const channels = settings.channelCount || inputSourceNode.channelCount || 1;
+
+      // Show/hide channel selector
+      if (chanSelect && chanSelect.parentElement) {
+        chanSelect.parentElement.style.display = channels > 1 ? '' : 'none';
+      }
+
+      // Disconnect any prior custom routing by recreating a Gain to isolate
+      try { inputSourceNode.disconnect(); } catch {}
+
+      if (channels > 1) {
+        const splitter = audioContext.createChannelSplitter(Math.max(2, channels));
+        inputSourceNode.connect(splitter);
+        if (chanMode === 'left') {
+          const gain = audioContext.createGain();
+          splitter.connect(gain, 0);
+          gain.connect(recorderNode);
+        } else if (chanMode === 'right') {
+          const gain = audioContext.createGain();
+          splitter.connect(gain, 1);
+          gain.connect(recorderNode);
+        } else {
+          // Auto (Sum L+R to mono)
+          const gainL = audioContext.createGain();
+          const gainR = audioContext.createGain();
+          gainL.gain.value = 0.5;
+          gainR.gain.value = 0.5;
+          splitter.connect(gainL, 0);
+          splitter.connect(gainR, 1);
+          const sum = audioContext.createGain();
+          gainL.connect(sum);
+          gainR.connect(sum);
+          sum.connect(recorderNode);
+        }
+      } else {
+        // Mono input, connect directly
+        inputSourceNode.connect(recorderNode);
+      }
+
       try {
-        const track = inputStream.getAudioTracks()[0];
         const label = track?.label || 'Unknown input device';
         setStatus(`Input device in use: ${label}`);
       } catch {}
@@ -529,9 +572,12 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const wavBlob = encodeWav24(finalBuf, audioContext.sampleRate);
       spectrumSamples = finalBuf;
       drawSpectrum();
+      // Auto-export spectrum and IR after capture completes
+      try { exportSpectrumFile(); } catch {}
+      try { exportImpulseResponse(); } catch {}
 
       $('#recordBtn').disabled = false;
-      setStatus('Capture completed.');
+      setStatus('Capture completed. Exported IR and Spectrum.');
       updatePlayButtonLabel();
     }
 
@@ -615,8 +661,7 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const content = lines.join("\r\n");
       const blob = new Blob([content], { type: 'text/plain' });
       const base = buildFilenameBase();
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      const name = `${base || 'spectrum'}_${ts}.spectrum`;
+      const name = `${(base || 'IR')}.spectrum`;
       triggerDownload(blob, name);
       setStatus(`Exported spectrum: ${name}`);
     }
@@ -636,8 +681,7 @@ registerProcessor('recorder-processor', RecorderProcessor);
       const norm = 1 / maxAbs; for (let i = 0; i < irLength; i++) truncated[i] *= norm;
       const blob = encodeWav24(truncated, sr);
       const base = buildFilenameBase();
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      const name = `${base || 'impulse'}_${ts}.wav`;
+      const name = `${(base || 'IR')}.wav`;
       triggerDownload(blob, name);
       setStatus(`Exported IR: ${name}`);
     }
@@ -711,6 +755,14 @@ registerProcessor('recorder-processor', RecorderProcessor);
         try { localStorage.setItem('ca-volume', String($('#volume').value)); } catch {}
       });
       $('#inputDevice').addEventListener('change', async (e) => { await initAudioIfNeeded(); localStorage.setItem('ca-selected-input', e.target.value || ''); await startInput(e.target.value); });
+      const chanSelEl = document.getElementById('inputChannel');
+      if (chanSelEl) {
+        chanSelEl.addEventListener('change', async () => {
+          await initAudioIfNeeded();
+          const currentId = document.getElementById('inputDevice')?.value || '';
+          await startInput(currentId);
+        });
+      }
       $('#sampleRateSel').addEventListener('change', async (e) => {
         const val = parseInt(e.target.value, 10) || 48000;
         requestedSampleRate = val;
@@ -1509,6 +1561,14 @@ registerProcessor('recorder-processor', RecorderProcessor);
           <div class="form-row">
             <label for="inputDevice">Input</label>
             <select id="inputDevice"></select>
+          </div>
+          <div class="form-row">
+            <label for="inputChannel">Channel</label>
+            <select id="inputChannel">
+              <option value="auto" selected>Auto (Sum)</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+            </select>
           </div>
           <div class="form-row">
             <label for="sampleRateSel">Sample rate</label>
