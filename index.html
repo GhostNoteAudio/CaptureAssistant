@@ -15,7 +15,7 @@
       color: #e5e7eb;
     }
     .wrap {
-      max-width: 900px;
+      max-width: 1170px;
       margin: 0 auto;
       padding: 20px;
     }
@@ -72,6 +72,22 @@
     #spectrumCanvas { width: 100%; height: 280px; background: #0a0f1a; border: 1px solid rgba(127,127,127,.35); border-radius: 8px; display: block; }
     .btn-reset { background: #475569; color: #fff; border-color: #334155; }
     .col-name { cursor: text; }
+    /* Layout adjustments */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+    .form-vertical { display: flex; flex-direction: column; gap: 12px; }
+    .form-row { display: flex; flex-direction: column; gap: 6px; }
+    .form-row label { font-size: 13px; opacity: .9; }
+    .form-row select, .form-row input[type="range"], .form-row button { width: 100%; max-width: 380px; }
+    .form-actions { display: flex; gap: 10px; }
+    /* Filename builder adders aligned bottom */
+    .adder-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-top: 12px; }
+    .adder-row .adder { display: flex; gap: 8px; }
+    .adder-row .adder input { width: 100%; }
+    /* Spectrum controls */
+    .spectrum-toolbar { display: flex; flex-direction: column; gap: 10px; }
+    .spectrum-controls { display: grid; grid-template-columns: auto 1fr auto auto 1fr auto auto 1fr auto; gap: 10px; align-items: center; }
+    .spectrum-controls input[type="range"] { width: 280px; }
+    .spectrum-actions { display: flex; gap: 10px; }
   </style>
   <meta http-equiv="origin-trial" content="">
   <!-- All logic inlined below -->
@@ -699,7 +715,9 @@ registerProcessor('recorder-processor', RecorderProcessor);
       irSizeSlider.addEventListener('input', () => {
         const idx = Math.max(0, Math.min(irSizeOpts.length - 1, parseInt(irSizeSlider.value, 10) || 0));
         irSizeLabel.textContent = String(irSizeOpts[idx]);
+        drawSpectrum();
       });
+      irSizeSlider.addEventListener('change', () => { drawSpectrum(); });
       document.getElementById('resetView').addEventListener('click', () => resetSpectrumView());
       document.getElementById('toggleView').addEventListener('click', () => {
         showImpulse = !showImpulse;
@@ -1361,44 +1379,53 @@ registerProcessor('recorder-processor', RecorderProcessor);
   <div class="wrap">
     <h1>Capture Assistant</h1>
 
-    <fieldset>
-      <legend>Test Signal</legend>
-      <div class="row">
-        <label for="signalType">Signal</label>
-        <select id="signalType">
-          <option value="white">White noise</option>
-          <option value="pink">Pink noise</option>
-          <option value="sine">Sine 1 kHz</option>
-        </select>
-        <div class="spacer"></div>
-        <div class="row slider-row">
-          <label for="volume">Volume</label>
-          <input id="volume" type="range" min="0" max="1" step="0.01" value="0.2" />
+    <div class="two-col">
+      <fieldset>
+        <legend>Test Signal</legend>
+        <div class="form-vertical">
+          <div class="form-row">
+            <label for="signalType">Signal</label>
+            <select id="signalType">
+              <option value="white">White noise</option>
+              <option value="pink">Pink noise</option>
+              <option value="sine">Sine 1 kHz</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label for="volume">Volume</label>
+            <input id="volume" type="range" min="0" max="1" step="0.01" value="0.2" />
+          </div>
+          <div class="form-row">
+            <label for="outputDevice">Output</label>
+            <select id="outputDevice"></select>
+          </div>
+          <div class="form-actions">
+            <button id="playBtn" class="btn-secondary" type="button">Play Test Signal</button>
+          </div>
         </div>
-        <div class="spacer"></div>
-        <label for="outputDevice">Output</label>
-        <select id="outputDevice"></select>
-      </div>
-      <div class="row" style="margin-top:10px; gap: 10px;">
-        <button id="playBtn" class="btn-secondary" type="button">Play Test Signal</button>
-      </div>
-    </fieldset>
+      </fieldset>
 
-    <fieldset>
-      <legend>Input</legend>
-      <div class="row">
-        <label for="inputDevice">Input</label>
-        <select id="inputDevice"></select>
-        <label for="sampleRateSel">Sample rate</label>
-        <select id="sampleRateSel">
-          <option value="44100">44,100 Hz</option>
-          <option value="48000" selected>48,000 Hz</option>
-          <option value="96000">96,000 Hz</option>
-        </select>
-        <div class="spacer"></div>
-        <button id="initBtn" class="btn-secondary" type="button">Initialize / Refresh Devices</button>
-      </div>
-    </fieldset>
+      <fieldset>
+        <legend>Input</legend>
+        <div class="form-vertical">
+          <div class="form-row">
+            <label for="inputDevice">Input</label>
+            <select id="inputDevice"></select>
+          </div>
+          <div class="form-row">
+            <label for="sampleRateSel">Sample rate</label>
+            <select id="sampleRateSel">
+              <option value="44100">44,100 Hz</option>
+              <option value="48000" selected>48,000 Hz</option>
+              <option value="96000">96,000 Hz</option>
+            </select>
+          </div>
+          <div class="form-actions">
+            <button id="initBtn" class="btn-secondary" type="button">Initialize / Refresh Devices</button>
+          </div>
+        </div>
+      </fieldset>
+    </div>
 
     <fieldset>
       <legend>Filename Builder</legend>
@@ -1406,26 +1433,31 @@ registerProcessor('recorder-processor', RecorderProcessor);
         <div class="col" data-col="0">
           <h3 class="col-name" id="colName0" contenteditable="true" spellcheck="false">Column 1</h3>
           <ul id="col0" class="list"></ul>
-          <div class="adder">
-            <input id="add0" type="text" placeholder="Add value" />
-            <button id="btnAdd0" class="btn-secondary" type="button">Add</button>
-          </div>
+          
         </div>
         <div class="col" data-col="1">
           <h3 class="col-name" id="colName1" contenteditable="true" spellcheck="false">Column 2</h3>
           <ul id="col1" class="list"></ul>
-          <div class="adder">
-            <input id="add1" type="text" placeholder="Add value" />
-            <button id="btnAdd1" class="btn-secondary" type="button">Add</button>
-          </div>
+          
         </div>
         <div class="col" data-col="2">
           <h3 class="col-name" id="colName2" contenteditable="true" spellcheck="false">Column 3</h3>
           <ul id="col2" class="list"></ul>
-          <div class="adder">
-            <input id="add2" type="text" placeholder="Add value" />
-            <button id="btnAdd2" class="btn-secondary" type="button">Add</button>
-          </div>
+          
+        </div>
+      </div>
+      <div class="adder-row">
+        <div class="adder">
+          <input id="add0" type="text" placeholder="Add value" />
+          <button id="btnAdd0" class="btn-secondary" type="button">Add</button>
+        </div>
+        <div class="adder">
+          <input id="add1" type="text" placeholder="Add value" />
+          <button id="btnAdd1" class="btn-secondary" type="button">Add</button>
+        </div>
+        <div class="adder">
+          <input id="add2" type="text" placeholder="Add value" />
+          <button id="btnAdd2" class="btn-secondary" type="button">Add</button>
         </div>
       </div>
     </fieldset>
@@ -1442,16 +1474,18 @@ registerProcessor('recorder-processor', RecorderProcessor);
       <legend>Spectrum</legend>
       <div class="spectrum-wrap">
         <div class="spectrum-toolbar">
-          <label for="fftSize">FFT size</label>
-          <input id="fftSize" type="range" min="0" max="5" step="1" value="2" />
-          <span class="muted" id="fftLabel">4096</span>
-          <label for="smoothSize" style="margin-left:10px;">Smoothing</label>
-          <input id="smoothSize" type="range" min="0" max="100" step="1" value="0" />
-          <span class="muted" id="smoothLabel">0</span>
-          <label for="irSize" style="margin-left:10px;">IR Size</label>
-          <input id="irSize" type="range" min="0" max="3" step="1" value="2" />
-          <span class="muted" id="irSizeLabel">4096</span>
-          <div class="right">
+          <div class="spectrum-controls">
+            <label for="fftSize">FFT size</label>
+            <input id="fftSize" type="range" min="0" max="5" step="1" value="2" />
+            <span class="muted" id="fftLabel">4096</span>
+            <label for="smoothSize">Smoothing</label>
+            <input id="smoothSize" type="range" min="0" max="100" step="1" value="0" />
+            <span class="muted" id="smoothLabel">0</span>
+            <label for="irSize">IR Size</label>
+            <input id="irSize" type="range" min="0" max="3" step="1" value="2" />
+            <span class="muted" id="irSizeLabel">4096</span>
+          </div>
+          <div class="spectrum-actions">
             <button id="exportSpectrum" class="btn-secondary" type="button">Export Spectrum</button>
             <button id="exportIR" class="btn-secondary" type="button">Export IR</button>
             <button id="toggleView" class="btn-secondary" type="button">Show Impulse</button>
