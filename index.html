@@ -81,6 +81,12 @@
     .form-row select, .form-row input[type="range"], .form-row button { width: 100%; max-width: 380px; }
     .form-actions { display: flex; gap: 10px; margin-top: auto; }
     .form-actions.input-actions { padding-top: 18px; }
+    .form-actions { justify-content: space-between; align-items: center; }
+    /* Input level meter */
+    .meter { display: flex; align-items: center; gap: 8px; min-width: 240px; }
+    .meter-track { position: relative; flex: 1 1 auto; height: 12px; background: #1f2937; border-radius: 6px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); }
+    .meter-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: #22c55e; transition: width 60ms linear, background-color 120ms linear; }
+    .meter-label { font-size: 12px; opacity: 0.8; min-width: 46px; text-align: right; }
     /* Filename builder adders aligned bottom */
     .adder-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-top: 12px; }
     .adder-row .adder { display: flex; gap: 8px; }
@@ -133,6 +139,10 @@
     let showImpulse = false; // false = spectrum view, true = impulse response view
     let specBackup = { xMin: 20, xMax: 24000, yMin: -120, yMax: 0 };
     let impLastLength = 0;
+    // Meter state
+    let meterAnalyser = null;
+    let meterTimeData = null;
+    let meterRafHandle = 0;
 
     // Capability checks
     const canSelectOutput = () => typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
@@ -433,6 +443,13 @@ registerProcessor('recorder-processor', RecorderProcessor);
       }
       inputSourceNode = audioContext.createMediaStreamSource(inputStream);
 
+      // Real-time peak meter: create analyser inline and branch from it
+      const inlineAnalyser = setupInputMeter(inputSourceNode);
+      const meterSource = inlineAnalyser || inputSourceNode;
+
+      // Ensure processing is running for metering
+      try { await audioContext.resume(); } catch {}
+
       // Inspect channel count and route to mono based on selection
       const chanSelect = document.getElementById('inputChannel');
       const chanMode = chanSelect ? chanSelect.value : 'auto';
@@ -445,12 +462,9 @@ registerProcessor('recorder-processor', RecorderProcessor);
         chanSelect.parentElement.style.display = channels > 1 ? '' : 'none';
       }
 
-      // Disconnect any prior custom routing by recreating a Gain to isolate
-      try { inputSourceNode.disconnect(); } catch {}
-
       if (channels > 1) {
         const splitter = audioContext.createChannelSplitter(Math.max(2, channels));
-        inputSourceNode.connect(splitter);
+        meterSource.connect(splitter);
         if (chanMode === 'left') {
           const gain = audioContext.createGain();
           splitter.connect(gain, 0);
@@ -474,13 +488,58 @@ registerProcessor('recorder-processor', RecorderProcessor);
         }
       } else {
         // Mono input, connect directly
-        inputSourceNode.connect(recorderNode);
+        meterSource.connect(recorderNode);
       }
 
       try {
         const label = track?.label || 'Unknown input device';
         setStatus(`Input device in use: ${label}`);
       } catch {}
+    }
+
+    function setupInputMeter(sourceNode) {
+      try {
+        // Reuse a single analyser across re-inits
+        if (meterAnalyser) {
+          try { sourceNode.disconnect(meterAnalyser); } catch {}
+        }
+        meterAnalyser = audioContext.createAnalyser();
+        meterAnalyser.fftSize = 2048;
+        meterAnalyser.smoothingTimeConstant = 0.0;
+        meterAnalyser.minDecibels = -120;
+        meterAnalyser.maxDecibels = 0;
+        meterTimeData = new Float32Array(meterAnalyser.fftSize);
+        // Tap the source for metering; do not interrupt main routing
+        sourceNode.connect(meterAnalyser);
+        const fillEl = document.getElementById('meterFill');
+        const labelEl = document.getElementById('meterLabel');
+        if (meterRafHandle) cancelAnimationFrame(meterRafHandle);
+        function raf() {
+          try {
+            meterAnalyser.getFloatTimeDomainData(meterTimeData);
+            let peak = 0;
+            for (let i = 0; i < meterTimeData.length; i++) {
+              const v = Math.abs(meterTimeData[i]);
+              if (v > peak) peak = v;
+            }
+            const db = peak > 0 ? 20 * Math.log10(peak) : -120;
+            const norm = Math.max(0, Math.min(1, peak));
+            if (fillEl) {
+              fillEl.style.width = `${(norm * 100).toFixed(1)}%`;
+              // Color zones
+              let color = '#22c55e';
+              if (peak > 0.7) color = '#ef4444'; else if (peak > 0.25) color = '#eab308';
+              fillEl.style.backgroundColor = color;
+            }
+            if (labelEl) labelEl.textContent = isFinite(db) ? `${db.toFixed(1)} dB` : '-∞ dB';
+          } catch {}
+          meterRafHandle = requestAnimationFrame(raf);
+        }
+        meterRafHandle = requestAnimationFrame(raf);
+        return meterAnalyser;
+      } catch {
+        return null;
+      }
     }
 
     function stopInput() {
@@ -910,6 +969,11 @@ registerProcessor('recorder-processor', RecorderProcessor);
           // Load filename lists
           loadFilenameColumns();
           renderFilenameColumns();
+          // Auto-start input if we have a saved selection
+          const savedInput = localStorage.getItem('ca-selected-input') || document.getElementById('inputDevice')?.value || '';
+          if (savedInput) {
+            try { await startInput(savedInput); } catch {}
+          }
         } catch {
           // Silent; user can click Initialize
         }
@@ -1580,6 +1644,10 @@ registerProcessor('recorder-processor', RecorderProcessor);
           </div>
           <div class="form-actions input-actions">
             <button id="initBtn" class="btn-secondary" type="button">Initialize / Refresh Devices</button>
+            <div class="meter" title="Input peak level">
+              <div class="meter-track"><div id="meterFill" class="meter-fill"></div></div>
+              <div id="meterLabel" class="meter-label">-∞ dB</div>
+            </div>
           </div>
         </div>
       </fieldset>
