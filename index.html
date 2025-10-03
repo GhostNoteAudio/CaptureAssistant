@@ -58,8 +58,6 @@
     // Cache of input device info by id for validation and heuristics
     let inputDeviceInfoById = {};
 
-    // Worklets are now in external file loaded via addModule
-
     // Initialization
     async function initAudioIfNeeded() {
       if (initialized) return;
@@ -174,71 +172,20 @@
     // Input stream setup
     async function startInput(deviceId) {
       stopInput();
-      const selectedInfo = deviceId ? inputDeviceInfoById[deviceId] : null;
-      const expectedLabel = (selectedInfo?.label || '').toLowerCase();
-      const looksLikeUsb = /usb/.test(expectedLabel);
-
-      // Build a few increasingly-permissive constraint variants and try them in order.
-      const buildConstraintsPrimary = () => ({
+      // Request the selected device with minimal constraints
+      const constraints = {
         audio: {
           deviceId: deviceId ? { exact: deviceId } : undefined,
-          // Prefer stereo for USB, but don't force it hard (ideal). Many Android paths downmix anyway.
-          channelCount: looksLikeUsb ? { ideal: 2 } : { ideal: 1 },
-          sampleRate: requestedSampleRate || (looksLikeUsb ? 48000 : undefined),
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false
         }
-      });
-
-      const buildConstraintsFallback1 = () => ({
-        // Legacy/Chrome-specific fallback that sometimes works on Android when exact deviceId is ignored
-        audio: {
-          optional: deviceId ? [ { sourceId: deviceId } ] : [],
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false
-        }
-      });
-
-      const buildConstraintsFallback2 = () => ({
-        audio: {
-          // Try without any channel/sample hints, but keep exact deviceId
-          deviceId: deviceId ? { exact: deviceId } : undefined,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false
-        }
-      });
-
-      async function tryGet(constraints) {
-        const s = await navigator.mediaDevices.getUserMedia(constraints);
-        // Validate that we actually got the intended device if we know its label
-        const track = s.getAudioTracks()[0];
-        const gotLabel = (track?.label || '').toLowerCase();
-        if (deviceId && expectedLabel && gotLabel && !gotLabel.includes(expectedLabel)) {
-          // Not the device we expected; reject so we can try a fallback
-          try { s.getTracks().forEach(t => t.stop()); } catch {}
-          throw new Error(`Selected device mismatch (got "${track?.label || 'unknown'}")`);
-        }
-        return s;
-      }
+      };
       try {
-        // Try primary constraints
-        inputStream = await tryGet(buildConstraintsPrimary());
-      } catch (err1) {
-        try {
-          // Try legacy optional:sourceId fallback
-          inputStream = await tryGet(buildConstraintsFallback1());
-        } catch (err2) {
-          try {
-            // Try minimal exact-only
-            inputStream = await tryGet(buildConstraintsFallback2());
-          } catch (err3) {
-            setStatus(`Failed to access input device: ${(err3?.message || err2?.message || err1?.message || err3)}`);
-            return;
-          }
-        }
+        inputStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        setStatus(`Failed to access input device: ${err?.message || err}`);
+        return;
       }
       inputSourceNode = audioContext.createMediaStreamSource(inputStream);
 
@@ -821,14 +768,10 @@
       return parts.join('-');
     }
 
-    // (moved) Persist column name edits: bound in bindUI after DOM exists
-
     function sanitizeFilenamePart(s) {
       // Remove characters not allowed in filenames on Windows/macOS
       return s.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
     }
-
-    // ===== Spectrum computation and drawing =====
 
     function drawSpectrum() {
       const canvas = document.getElementById('spectrumCanvas');
