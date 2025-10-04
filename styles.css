@@ -74,7 +74,7 @@ option { color: #111; background: #fff; }
 .form-row select, .form-row input[type="range"], .form-row button { width: 100%; max-width: 380px; }
 .form-actions { display: flex; gap: 10px; margin-top: auto; }
 .form-actions.input-actions { padding-top: 18px; }
-.form-actions { justify-content: space-between; align-items: center; }
+.form-actions { align-items: center; }
 /* Input level meter */
 .meter { display: flex; align-items: center; gap: 8px; min-width: 240px; }
 .meter-track { position: relative; flex: 1 1 auto; height: 12px; background: #1f2937; border-radius: 6px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); }

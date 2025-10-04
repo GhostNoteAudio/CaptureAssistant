@@ -297,7 +297,7 @@ function setupInputMeter(sourceNode) {
           if (v > peak) peak = v;
         }
         const db = peak > 0 ? 20 * Math.log10(peak) : -120;
-        const norm = Math.max(0, Math.min(1, peak));
+        const norm = Math.min(1, Math.max(0, (db + 50) / 50));
 
         if (fillEl) {
           fillEl.style.width = `${(norm * 100).toFixed(1)}%`;
