@@ -60,6 +60,7 @@ let impLastLength = 0;
 let meterAnalyser = null;
 let meterTimeData = null;
 let meterRafHandle = 0;
+let meterTapNode = null;
 
 // ===== Export/Settings State =====
 
@@ -211,8 +212,7 @@ async function startInput(deviceId) {
   }
 
   inputSourceNode = audioContext.createMediaStreamSource(inputStream);
-  const inlineAnalyser = setupInputMeter(inputSourceNode);
-  const meterSource = inlineAnalyser || inputSourceNode;
+  setupInputMeter();
 
   try {
     await audioContext.resume();
@@ -230,17 +230,18 @@ async function startInput(deviceId) {
     chanSelect.parentElement.style.display = channels > 1 ? '' : 'none';
   }
 
+  let tapNode = inputSourceNode;
   if (channels > 1) {
     const splitter = audioContext.createChannelSplitter(Math.max(2, channels));
-    meterSource.connect(splitter);
+    inputSourceNode.connect(splitter);
     if (chanMode === 'left') {
       const gain = audioContext.createGain();
       splitter.connect(gain, 0);
-      gain.connect(recorderNode);
+      tapNode = gain;
     } else if (chanMode === 'right') {
       const gain = audioContext.createGain();
       splitter.connect(gain, 1);
-      gain.connect(recorderNode);
+      tapNode = gain;
     } else {
       const gainL = audioContext.createGain();
       const gainR = audioContext.createGain();
@@ -251,11 +252,14 @@ async function startInput(deviceId) {
       const sum = audioContext.createGain();
       gainL.connect(sum);
       gainR.connect(sum);
-      sum.connect(recorderNode);
+      tapNode = sum;
     }
-  } else {
-    meterSource.connect(recorderNode);
   }
+  // Connect selected channel to recorder
+  tapNode.connect(recorderNode);
+  // Route selected channel to meter analyser (mirror of actual capture path)
+  try { if (meterTapNode) meterTapNode.disconnect(meterAnalyser); } catch {}
+  try { tapNode.connect(meterAnalyser); meterTapNode = tapNode; } catch {}
 
   try {
     const label = track?.label || 'Unknown input device';
@@ -265,11 +269,11 @@ async function startInput(deviceId) {
   }
 }
 
-function setupInputMeter(sourceNode) {
+function setupInputMeter() {
   try {
     if (meterAnalyser) {
       try {
-        sourceNode.disconnect(meterAnalyser);
+        if (meterTapNode) meterTapNode.disconnect(meterAnalyser);
       } catch (e) {
         // Ignore disconnect errors
       }
@@ -281,7 +285,6 @@ function setupInputMeter(sourceNode) {
     meterAnalyser.minDecibels = -120;
     meterAnalyser.maxDecibels = 0;
     meterTimeData = new Float32Array(meterAnalyser.fftSize);
-    sourceNode.connect(meterAnalyser);
 
     const fillEl = document.getElementById('meterFill');
     const labelEl = document.getElementById('meterLabel');
