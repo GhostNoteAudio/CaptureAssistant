@@ -1,77 +1,105 @@
-import { encodeWav24, nearestPow2, hammingWindow, fftRadix2, ifftRadix2, computeSpectrum, hilbertFromScratch, interpDbAt, buildMinimumPhaseIRFromMag, applyFrequencySmoothing, truncateAndWindowIR } from './dsp.js';
-// Utility: UI helpers
+import {
+  encodeWav24,
+  nearestPow2,
+  hammingWindow,
+  fftRadix2,
+  ifftRadix2,
+  computeSpectrum,
+  hilbertFromScratch,
+  interpDbAt,
+  buildMinimumPhaseIRFromMag,
+  applyFrequencySmoothing,
+  truncateAndWindowIR
+} from './dsp.js';
+
+// ===== Utility Functions =====
+
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
-// Core state
+// ===== Core Audio State =====
+
 let audioContext = null;
 let requestedSampleRate = 48000;
 let masterGain = null;
-let outputDest = null;           // MediaStreamDestination
-let outputAudioEl = null;         // <audio> that plays outputDest
-let generatorNode = null;         // AudioWorkletNode producing test signals
-let recorderNode = null;          // AudioWorkletNode capturing input
-let inputStream = null;           // MediaStream for selected input
-let inputSourceNode = null;       // MediaStreamAudioSourceNode from inputStream
+let outputDest = null;
+let outputAudioEl = null;
+let generatorNode = null;
+let recorderNode = null;
+let inputStream = null;
+let inputSourceNode = null;
 let initialized = false;
 let isPlayingTest = false;
-let directOutConnected = false;   // whether masterGain is connected to destination
+let directOutConnected = false;
+let inputDeviceInfoById = {};
+
+// ===== Recording State =====
+
 let isRecording = false;
 let recordingTimer = null;
 let startCaptureTimer = null;
 let recordTargetSamples = 0;
 let recordWriteIndex = 0;
-let recordBuffer = null;          // Float32Array pre-allocated for 5s
+let recordBuffer = null;
+
+// ===== Filename Builder State =====
+
 const FILENAME_STORE_KEY = 'ca-filename-columns-v1';
-let filenameColumns = [[], [], []]; // entries per column
+let filenameColumns = [[], [], []];
 let filenameColumnNames = ['Column 1', 'Column 2', 'Column 3'];
-let selectedIndices = [null, null, null]; // selected index per column (or null)
-// Spectrum state
-let spectrumSamples = null; // Float32 samples of last recording
+let selectedIndices = [null, null, null];
+
+// ===== Spectrum/Visualization State =====
+
+let spectrumSamples = null;
 let spectrumFftSize = 4096;
-let viewXMin = 20;      // Hz
-let viewXMax = 24000;   // Hz
-let viewYMin = -120;    // dB
-let viewYMax = 0;       // dB
+let viewXMin = 20; // Hz
+let viewXMax = 24000; // Hz
+let viewYMin = -120; // dB
+let viewYMax = 0; // dB
 let isPanning = false;
 let panStart = null;
-let showImpulse = false; // false = spectrum view, true = impulse response view
+let showImpulse = false;
 let specBackup = { xMin: 20, xMax: 24000, yMin: -120, yMax: 0 };
 let impLastLength = 0;
-// Meter state
+
+// ===== Level Meter State =====
+
 let meterAnalyser = null;
 let meterTimeData = null;
 let meterRafHandle = 0;
 
-// Capability checks
-const canSelectOutput = () => typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
-// Cache of input device info by id for validation and heuristics
-let inputDeviceInfoById = {};
+// ===== Capability Checks =====
 
-// Initialization
+const canSelectOutput = () =>
+  typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
+
+// ===== Audio Initialization =====
 async function initAudioIfNeeded() {
   if (initialized) return;
+
   const opts = {};
   if (requestedSampleRate) opts.sampleRate = requestedSampleRate;
   audioContext = new (window.AudioContext || window.webkitAudioContext)(opts);
-  // Load worklets
+
   await audioContext.audioWorklet.addModule('./worklets.js');
 
-  // Output path: generator -> masterGain -> MediaStreamDestination -> <audio>
   masterGain = audioContext.createGain();
   masterGain.gain.value = parseFloat($('#volume').value);
   outputDest = audioContext.createMediaStreamDestination();
   masterGain.connect(outputDest);
 
-  // Create generator node (mono output)
-  generatorNode = new AudioWorkletNode(audioContext, 'test-signal-processor', { outputChannelCount: [1] });
+  generatorNode = new AudioWorkletNode(audioContext, 'test-signal-processor', {
+    outputChannelCount: [1]
+  });
   generatorNode.connect(masterGain);
 
-  // Create recorder node (input only, no outputs)
-  recorderNode = new AudioWorkletNode(audioContext, 'recorder-processor', { numberOfInputs: 1, numberOfOutputs: 0 });
+  recorderNode = new AudioWorkletNode(audioContext, 'recorder-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 0
+  });
   recorderNode.port.onmessage = onRecorderMessage;
 
-  // Audio element for routing to selected output device
   outputAudioEl = document.createElement('audio');
   outputAudioEl.autoplay = true;
   outputAudioEl.playsInline = true;
@@ -80,16 +108,18 @@ async function initAudioIfNeeded() {
   outputAudioEl.style.display = 'none';
   document.body.appendChild(outputAudioEl);
 
-  // Try to start audio (user gesture usually needed when clicking buttons)
-  try { await outputAudioEl.play(); } catch (e) { /* ignore */ }
+  try {
+    await outputAudioEl.play();
+  } catch (e) {
+    // Ignore autoplay errors
+  }
 
   initialized = true;
 }
 
-// Device management
+// ===== Device Management =====
 async function ensureDeviceAccess() {
   try {
-    // Request mic once to reveal device labels
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach(t => t.stop());
   } catch (err) {
@@ -99,17 +129,21 @@ async function ensureDeviceAccess() {
 
 async function refreshDevices() {
   if (!navigator.mediaDevices?.enumerateDevices) return;
+
   const devices = await navigator.mediaDevices.enumerateDevices();
-  const inputs = devices.filter(d => d.kind === 'audioinput').sort((a,b)=> (a.label||'').localeCompare(b.label||''));
-  const outputs = devices.filter(d => d.kind === 'audiooutput').sort((a,b)=> (a.label||'').localeCompare(b.label||''));
+  const inputs = devices
+    .filter(d => d.kind === 'audioinput')
+    .sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+  const outputs = devices
+    .filter(d => d.kind === 'audiooutput')
+    .sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+
   const inputSel = $('#inputDevice');
   const outputSel = $('#outputDevice');
 
-  // Remember selections
   const prevIn = inputSel.value || localStorage.getItem('ca-selected-input') || '';
   const prevOut = outputSel.value || localStorage.getItem('ca-selected-output') || '';
 
-  // Populate input devices
   inputSel.innerHTML = '';
   inputDeviceInfoById = {};
   for (const d of inputs) {
@@ -126,7 +160,6 @@ async function refreshDevices() {
     inputSel.appendChild(opt);
   }
 
-  // Populate output devices
   outputSel.innerHTML = '';
   for (const d of outputs) {
     const opt = document.createElement('option');
@@ -141,11 +174,9 @@ async function refreshDevices() {
     outputSel.appendChild(opt);
   }
 
-  // Restore if possible
   if ([...inputSel.options].some(o => o.value === prevIn)) inputSel.value = prevIn;
   if ([...outputSel.options].some(o => o.value === prevOut)) outputSel.value = prevOut;
 
-  // Apply sink to current audio element
   await applyOutputSink();
 }
 
@@ -153,16 +184,19 @@ async function applyOutputSink() {
   if (!outputAudioEl) return;
   const outId = $('#outputDevice').value;
   if (canSelectOutput() && outId) {
-    try { await outputAudioEl.setSinkId(outId); }
-    catch (e) { setStatus(`Cannot set output device: ${e?.message || e}`); }
+    try {
+      await outputAudioEl.setSinkId(outId);
+    } catch (e) {
+      setStatus(`Cannot set output device: ${e?.message || e}`);
+    }
   }
   updateOutputRouting();
 }
 
-// Input stream setup
+// ===== Input Stream Management =====
 async function startInput(deviceId) {
   stopInput();
-  // Request the selected device with minimal constraints
+
   const constraints = {
     audio: {
       deviceId: deviceId ? { exact: deviceId } : undefined,
@@ -171,29 +205,30 @@ async function startInput(deviceId) {
       autoGainControl: false
     }
   };
+
   try {
     inputStream = await navigator.mediaDevices.getUserMedia(constraints);
   } catch (err) {
     setStatus(`Failed to access input device: ${err?.message || err}`);
     return;
   }
-  inputSourceNode = audioContext.createMediaStreamSource(inputStream);
 
-  // Real-time peak meter: create analyser inline and branch from it
+  inputSourceNode = audioContext.createMediaStreamSource(inputStream);
   const inlineAnalyser = setupInputMeter(inputSourceNode);
   const meterSource = inlineAnalyser || inputSourceNode;
 
-  // Ensure processing is running for metering
-  try { await audioContext.resume(); } catch {}
+  try {
+    await audioContext.resume();
+  } catch (e) {
+    // Ignore resume errors
+  }
 
-  // Inspect channel count and route to mono based on selection
   const chanSelect = document.getElementById('inputChannel');
   const chanMode = chanSelect ? chanSelect.value : 'auto';
   const track = inputStream.getAudioTracks()[0];
   const settings = track.getSettings ? track.getSettings() : {};
   const channels = settings.channelCount || inputSourceNode.channelCount || 1;
 
-  // Show/hide channel selector
   if (chanSelect && chanSelect.parentElement) {
     chanSelect.parentElement.style.display = channels > 1 ? '' : 'none';
   }
@@ -210,7 +245,6 @@ async function startInput(deviceId) {
       splitter.connect(gain, 1);
       gain.connect(recorderNode);
     } else {
-      // Auto (Sum L+R to mono)
       const gainL = audioContext.createGain();
       const gainR = audioContext.createGain();
       gainL.gain.value = 0.5;
@@ -223,33 +257,40 @@ async function startInput(deviceId) {
       sum.connect(recorderNode);
     }
   } else {
-    // Mono input, connect directly
     meterSource.connect(recorderNode);
   }
 
   try {
     const label = track?.label || 'Unknown input device';
     setStatus(`Input device in use: ${label}`);
-  } catch {}
+  } catch (e) {
+    // Ignore label errors
+  }
 }
 
 function setupInputMeter(sourceNode) {
   try {
-    // Reuse a single analyser across re-inits
     if (meterAnalyser) {
-      try { sourceNode.disconnect(meterAnalyser); } catch {}
+      try {
+        sourceNode.disconnect(meterAnalyser);
+      } catch (e) {
+        // Ignore disconnect errors
+      }
     }
+
     meterAnalyser = audioContext.createAnalyser();
     meterAnalyser.fftSize = 2048;
     meterAnalyser.smoothingTimeConstant = 0.0;
     meterAnalyser.minDecibels = -120;
     meterAnalyser.maxDecibels = 0;
     meterTimeData = new Float32Array(meterAnalyser.fftSize);
-    // Tap the source for metering; do not interrupt main routing
     sourceNode.connect(meterAnalyser);
+
     const fillEl = document.getElementById('meterFill');
     const labelEl = document.getElementById('meterLabel');
+
     if (meterRafHandle) cancelAnimationFrame(meterRafHandle);
+
     function raf() {
       try {
         meterAnalyser.getFloatTimeDomainData(meterTimeData);
@@ -260,26 +301,36 @@ function setupInputMeter(sourceNode) {
         }
         const db = peak > 0 ? 20 * Math.log10(peak) : -120;
         const norm = Math.max(0, Math.min(1, peak));
+
         if (fillEl) {
           fillEl.style.width = `${(norm * 100).toFixed(1)}%`;
-          // Color zones
           let color = '#22c55e';
-          if (peak > 0.7) color = '#ef4444'; else if (peak > 0.25) color = '#eab308';
+          if (peak > 0.7) color = '#ef4444';
+          else if (peak > 0.25) color = '#eab308';
           fillEl.style.backgroundColor = color;
         }
-        if (labelEl) labelEl.textContent = isFinite(db) ? `${db.toFixed(1)} dB` : '-∞ dB';
-      } catch {}
+        if (labelEl) {
+          labelEl.textContent = isFinite(db) ? `${db.toFixed(1)} dB` : '-∞ dB';
+        }
+      } catch (e) {
+        // Ignore meter errors
+      }
       meterRafHandle = requestAnimationFrame(raf);
     }
+
     meterRafHandle = requestAnimationFrame(raf);
     return meterAnalyser;
-  } catch {
+  } catch (e) {
     return null;
   }
 }
 
 function stopInput() {
-  try { if (inputSourceNode) inputSourceNode.disconnect(); } catch {}
+  try {
+    if (inputSourceNode) inputSourceNode.disconnect();
+  } catch (e) {
+    // Ignore disconnect errors
+  }
   inputSourceNode = null;
   if (inputStream) {
     inputStream.getTracks().forEach(t => t.stop());
@@ -287,11 +338,16 @@ function stopInput() {
   }
 }
 
-// Generator control
+// ===== Generator Control =====
 async function configureGenerator() {
-  const mode = $('#signalType').value; // 'sine' | 'white' | 'pink'
-  const freq = 1000; // fixed per requirements
-  generatorNode.port.postMessage({ type: 'config', mode, freq, enabled: isPlayingTest });
+  const mode = $('#signalType').value;
+  const freq = 1000;
+  generatorNode.port.postMessage({
+    type: 'config',
+    mode,
+    freq,
+    enabled: isPlayingTest
+  });
   masterGain.gain.value = parseFloat($('#volume').value);
   await applyOutputSink();
 }
@@ -303,7 +359,7 @@ function setGeneratorPlaying(on) {
   updatePlayButtonLabel();
 }
 
-// Recorder messaging
+// ===== Recording Flow =====
 function onRecorderMessage(ev) {
   const m = ev.data || {};
   if (m.type === 'data' && recordBuffer) {
@@ -314,7 +370,6 @@ function onRecorderMessage(ev) {
     recordBuffer.set(chunk.subarray(0, toCopy), recordWriteIndex);
     recordWriteIndex += toCopy;
     if (recordWriteIndex >= recordTargetSamples) {
-      // we reached target length; stop now
       stopRecordingFlow();
     }
   }
@@ -323,10 +378,10 @@ function onRecorderMessage(ev) {
 function startRecordingFlow() {
   if (isRecording) return;
   if (!initialized) {
-    // Should not happen since record button initializes, but guard anyway
     setStatus('Audio not initialized.');
     return;
   }
+
   const sr = audioContext.sampleRate;
   recordTargetSamples = Math.round(sr * 5);
   recordBuffer = new Float32Array(recordTargetSamples);
@@ -335,47 +390,62 @@ function startRecordingFlow() {
   $('#recordBtn').disabled = true;
   setStatus('Starting test signal...');
 
-  // Start test signal immediately
   setGeneratorPlaying(true);
   configureGenerator();
 
-  // Start capture after 0.5 seconds
   startCaptureTimer = setTimeout(() => {
     recorderNode.port.postMessage({ type: 'set-recording', enabled: true });
     setStatus('Recording for 5 seconds...');
-    // Also set a hard timeout in case we don't hit exact samples
-    recordingTimer = setTimeout(() => stopRecordingFlow(), 5000 + 100 /* guard */);
+    recordingTimer = setTimeout(() => stopRecordingFlow(), 5100);
   }, 500);
 }
 
 function stopRecordingFlow() {
   if (!isRecording) return;
   isRecording = false;
-  try { recorderNode.port.postMessage({ type: 'set-recording', enabled: false }); } catch {}
-  if (startCaptureTimer) { clearTimeout(startCaptureTimer); startCaptureTimer = null; }
-  if (recordingTimer) { clearTimeout(recordingTimer); recordingTimer = null; }
 
-  // Stop test signal
+  try {
+    recorderNode.port.postMessage({ type: 'set-recording', enabled: false });
+  } catch (e) {
+    // Ignore messaging errors
+  }
+
+  if (startCaptureTimer) {
+    clearTimeout(startCaptureTimer);
+    startCaptureTimer = null;
+  }
+  if (recordingTimer) {
+    clearTimeout(recordingTimer);
+    recordingTimer = null;
+  }
+
   setGeneratorPlaying(false);
 
-  // Finalize buffer length
   const finalSamples = Math.min(recordWriteIndex, recordTargetSamples);
-  const finalBuf = finalSamples === recordTargetSamples ? recordBuffer : recordBuffer.slice(0, finalSamples);
+  const finalBuf =
+    finalSamples === recordTargetSamples ? recordBuffer : recordBuffer.slice(0, finalSamples);
 
-  // Encode and download
-  // No auto-save; keep samples for spectrum/IR only
   const wavBlob = encodeWav24(finalBuf, audioContext.sampleRate);
   spectrumSamples = finalBuf;
   drawSpectrum();
-  // Auto-export spectrum and IR after capture completes
-  try { exportSpectrumFile(); } catch {}
-  try { exportImpulseResponse(); } catch {}
+
+  try {
+    exportSpectrumFile();
+  } catch (e) {
+    // Ignore export errors
+  }
+  try {
+    exportImpulseResponse();
+  } catch (e) {
+    // Ignore export errors
+  }
 
   $('#recordBtn').disabled = false;
   setStatus('Capture completed. Exported IR and Spectrum.');
   updatePlayButtonLabel();
 }
 
+// ===== Export Functions =====
 
 function triggerDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -389,13 +459,19 @@ function triggerDownload(blob, filename) {
 }
 
 function exportSpectrumFile() {
-  if (!spectrumSamples || !audioContext) { setStatus('Nothing to export. Perform a capture first.'); return; }
+  if (!spectrumSamples || !audioContext) {
+    setStatus('Nothing to export. Perform a capture first.');
+    return;
+  }
+
   const sr = audioContext.sampleRate | 0;
   let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
   const smoothSlider = document.getElementById('smoothSize');
   const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
-  if (smoothFactor > 0) magDb = applyFrequencySmoothing(freq, magDb, smoothFactor, spectrumFftSize);
-  // Convert dB to magnitude: y = 10^(x/20), and write each point on its own line with CRLF
+  if (smoothFactor > 0) {
+    magDb = applyFrequencySmoothing(freq, magDb, smoothFactor, spectrumFftSize);
+  }
+
   const header = String(sr);
   const lines = [header];
   for (let i = 0; i < magDb.length; i++) {
@@ -403,30 +479,45 @@ function exportSpectrumFile() {
     const mag = Math.pow(10, db / 20);
     lines.push(mag.toFixed(8));
   }
-  const content = lines.join("\r\n");
+
+  const content = lines.join('\r\n');
   const blob = new Blob([content], { type: 'text/plain' });
   const base = buildFilenameBase();
-  const name = `${(base || 'IR')}.spectrum`;
+  const name = `${base || 'IR'}.spectrum`;
   triggerDownload(blob, name);
   setStatus(`Exported spectrum: ${name}`);
 }
 
 function exportImpulseResponse() {
-  if (!spectrumSamples || !audioContext) { setStatus('Nothing to export. Perform a capture first.'); return; }
+  if (!spectrumSamples || !audioContext) {
+    setStatus('Nothing to export. Perform a capture first.');
+    return;
+  }
+
   const sr = audioContext.sampleRate | 0;
   let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
   const smoothSlider = document.getElementById('smoothSize');
   const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
-  if (smoothFactor > 0) magDb = applyFrequencySmoothing(freq, magDb, smoothFactor, spectrumFftSize);
+  if (smoothFactor > 0) {
+    magDb = applyFrequencySmoothing(freq, magDb, smoothFactor, spectrumFftSize);
+  }
+
   const ir = buildMinimumPhaseIRFromMag(freq, magDb, sr, spectrumFftSize);
   const irLength = getSelectedIrLength();
   const truncated = truncateAndWindowIR(ir, irLength);
-  // Normalize before export
-  let maxAbs = 1e-12; for (let i = 0; i < irLength; i++) maxAbs = Math.max(maxAbs, Math.abs(truncated[i]));
-  const norm = 1 / maxAbs; for (let i = 0; i < irLength; i++) truncated[i] *= norm;
+
+  let maxAbs = 1e-12;
+  for (let i = 0; i < irLength; i++) {
+    maxAbs = Math.max(maxAbs, Math.abs(truncated[i]));
+  }
+  const norm = 1 / maxAbs;
+  for (let i = 0; i < irLength; i++) {
+    truncated[i] *= norm;
+  }
+
   const blob = encodeWav24(truncated, sr);
   const base = buildFilenameBase();
-  const name = `${(base || 'IR')}.wav`;
+  const name = `${base || 'IR'}.wav`;
   triggerDownload(blob, name);
   setStatus(`Exported IR: ${name}`);
 }
@@ -438,12 +529,11 @@ function getSelectedIrLength() {
   return irSizeOpts[idx];
 }
 
-
 function setStatus(text) {
   $('#status').textContent = text || '';
 }
 
-// UI wiring
+// ===== UI Event Handlers =====
 async function onInitDevicesClick() {
   await initAudioIfNeeded();
   await ensureDeviceAccess();
@@ -453,15 +543,19 @@ async function onInitDevicesClick() {
 
 async function onRecordClick() {
   await initAudioIfNeeded();
-  // Ensure we have at least default input
   const inId = $('#inputDevice').value;
   if (!inputStream) await startInput(inId);
-  // Ensure sink
   await applyOutputSink();
-  // Resume context to be safe
-  try { await audioContext.resume(); } catch {}
-  // Ensure the hidden audio element is actually playing (user gesture context)
-  try { await outputAudioEl.play(); } catch {}
+  try {
+    await audioContext.resume();
+  } catch (e) {
+    // Ignore resume errors
+  }
+  try {
+    await outputAudioEl.play();
+  } catch (e) {
+    // Ignore play errors
+  }
   startRecordingFlow();
 }
 
@@ -470,9 +564,16 @@ async function onPlayToggleClick() {
   const newState = !isPlayingTest;
   setGeneratorPlaying(newState);
   await configureGenerator();
-  // Ensure audio context and HTMLMediaElement are playing under user gesture
-  try { await audioContext.resume(); } catch {}
-  try { await outputAudioEl.play(); } catch {}
+  try {
+    await audioContext.resume();
+  } catch (e) {
+    // Ignore resume errors
+  }
+  try {
+    await outputAudioEl.play();
+  } catch (e) {
+    // Ignore play errors
+  }
   updatePlayButtonLabel();
   setStatus(newState ? 'Playing test signal...' : '');
 }
@@ -622,14 +723,14 @@ function bindUI() {
   initSpectrumCanvasInteractions();
 }
 
+// ===== App Initialization =====
+
 window.addEventListener('DOMContentLoaded', () => {
   bindUI();
-  // Attempt to init devices proactively; if permission blocked, user can press Initialize
   (async () => {
     try {
-      // restore requested sample rate
       const savedSr = parseInt(localStorage.getItem('ca-sr') || '48000', 10);
-      if ([44100,48000,96000].includes(savedSr)) {
+      if ([44100, 48000, 96000].includes(savedSr)) {
         requestedSampleRate = savedSr;
         const srSel = document.getElementById('sampleRateSel');
         if (srSel) srSel.value = String(savedSr);
@@ -639,15 +740,20 @@ window.addEventListener('DOMContentLoaded', () => {
       await refreshDevices();
       setStatus('Ready.');
       updatePlayButtonLabel();
-      // Load filename lists
       loadFilenameColumns();
       renderFilenameColumns();
-      // Auto-start input if we have a saved selection
-      const savedInput = localStorage.getItem('ca-selected-input') || document.getElementById('inputDevice')?.value || '';
+      const savedInput =
+        localStorage.getItem('ca-selected-input') ||
+        document.getElementById('inputDevice')?.value ||
+        '';
       if (savedInput) {
-        try { await startInput(savedInput); } catch {}
+        try {
+          await startInput(savedInput);
+        } catch (e) {
+          // Ignore errors
+        }
       }
-    } catch {
+    } catch (e) {
       // Silent; user can click Initialize
     }
   })();
@@ -659,26 +765,37 @@ function updatePlayButtonLabel() {
   btn.textContent = isPlayingTest ? 'Stop Test Signal' : 'Play Test Signal';
 }
 
-// ===== Filename builder logic =====
+// ===== Filename Builder =====
 function loadFilenameColumns() {
   try {
     const raw = localStorage.getItem(FILENAME_STORE_KEY);
     if (!raw) return;
     const data = JSON.parse(raw);
-    if (data && Array.isArray(data.columns) && data.columns.length === 3 && data.columns.every(col => Array.isArray(col))) {
+    if (
+      data &&
+      Array.isArray(data.columns) &&
+      data.columns.length === 3 &&
+      data.columns.every(col => Array.isArray(col))
+    ) {
       filenameColumns = data.columns.map(col => col.map(v => String(v)));
-    } else if (Array.isArray(data) && data.length === 3) { // backward compatibility
+    } else if (Array.isArray(data) && data.length === 3) {
       filenameColumns = data.map(col => col.map(v => String(v)));
     }
     if (data && Array.isArray(data.names) && data.names.length === 3) {
       filenameColumnNames = data.names.map(v => String(v) || '');
     }
-  } catch {}
+  } catch (e) {
+    // Ignore JSON parse errors
+  }
 }
 
 function saveFilenameColumns() {
   const payload = { columns: filenameColumns, names: filenameColumnNames };
-  try { localStorage.setItem(FILENAME_STORE_KEY, JSON.stringify(payload)); } catch {}
+  try {
+    localStorage.setItem(FILENAME_STORE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    // Ignore storage errors
+  }
 }
 
 function renderFilenameColumns() {
@@ -741,7 +858,11 @@ function removeEntry(colIndex, idx) {
 }
 
 function toggleSelect(colIndex, idx) {
-  if (selectedIndices[colIndex] === idx) selectedIndices[colIndex] = null; else selectedIndices[colIndex] = idx;
+  if (selectedIndices[colIndex] === idx) {
+    selectedIndices[colIndex] = null;
+  } else {
+    selectedIndices[colIndex] = idx;
+  }
   renderFilenameColumns();
 }
 
@@ -759,18 +880,25 @@ function buildFilenameBase() {
 }
 
 function sanitizeFilenamePart(s) {
-  // Remove characters not allowed in filenames on Windows/macOS
   return s.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
 }
+
+// ===== Spectrum Visualization =====
 
 function drawSpectrum() {
   const canvas = document.getElementById('spectrumCanvas');
   if (!canvas) return;
+
   const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const width = Math.max(300, Math.floor(rect.width * dpr));
   const height = Math.max(180, Math.floor(rect.height * dpr));
-  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
   const ctx = canvas.getContext('2d');
   ctx.save();
   ctx.clearRect(0, 0, width, height);
@@ -779,10 +907,14 @@ function drawSpectrum() {
   ctx.font = `${12 * dpr}px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial`;
   ctx.textBaseline = 'top';
   ctx.fillStyle = 'rgba(229,231,235,0.8)';
+
   if (!showImpulse) {
-    // Frequency-domain view
     drawSpectrumGrid(ctx, width, height);
-    if (!spectrumSamples) { ctx.restore(); return; }
+    if (!spectrumSamples) {
+      ctx.restore();
+      return;
+    }
+
     const sr = audioContext ? audioContext.sampleRate : 48000;
     let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
     const smoothSlider = document.getElementById('smoothSize');
@@ -790,6 +922,7 @@ function drawSpectrum() {
     if (smoothFactor > 0) {
       magDb = applyFrequencySmoothing(freq, magDb, smoothFactor, spectrumFftSize);
     }
+
     ctx.lineWidth = 2;
     ctx.strokeStyle = '#34d399';
     ctx.beginPath();
@@ -800,12 +933,19 @@ function drawSpectrum() {
       const d = magDb[i];
       const x = mapLog(f, viewXMin, viewXMax, 0, width);
       const y = mapLinear(d, viewYMax, viewYMin, 0, height);
-      if (!moved) { ctx.moveTo(x, y); moved = true; } else { ctx.lineTo(x, y); }
+      if (!moved) {
+        ctx.moveTo(x, y);
+        moved = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
     }
     ctx.stroke();
   } else {
-    // Time-domain impulse response (minimum-phase) view with shared pan/zoom (linear axes)
-    if (!spectrumSamples) { ctx.restore(); return; }
+    if (!spectrumSamples) {
+      ctx.restore();
+      return;
+    }
     const sr = audioContext ? audioContext.sampleRate : 48000;
     let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
     const smoothSlider = document.getElementById('smoothSize');
@@ -1016,9 +1156,8 @@ function resetSpectrumView() {
   drawSpectrum();
 }
 
+// ===== Output Routing =====
 
-// Output routing fallback: connect to default system output when sink selection
-// is unavailable or not chosen, otherwise use the HTMLMediaElement route only.
 function updateOutputRouting() {
   const wantDirect = !canSelectOutput() || !$('#outputDevice').value;
   ensureDirectOutputConnected(wantDirect && isPlayingTest);
@@ -1037,4 +1176,3 @@ function ensureDirectOutputConnected(shouldConnect) {
     }
   } catch {}
 }
-
