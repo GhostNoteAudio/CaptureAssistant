@@ -221,38 +221,28 @@ async function startInput(deviceId) {
   }
 
   const chanSelect = document.getElementById('inputChannel');
-  const chanMode = chanSelect ? chanSelect.value : 'auto';
+  const chanMode = chanSelect ? (chanSelect.value || 'left') : 'left';
   const track = inputStream.getAudioTracks()[0];
   const settings = track.getSettings ? track.getSettings() : {};
   const channels = settings.channelCount || inputSourceNode.channelCount || 1;
 
   if (chanSelect && chanSelect.parentElement) {
     chanSelect.parentElement.style.display = channels > 1 ? '' : 'none';
+    if (channels <= 1) chanSelect.value = 'left';
   }
 
   let tapNode = inputSourceNode;
   if (channels > 1) {
     const splitter = audioContext.createChannelSplitter(Math.max(2, channels));
     inputSourceNode.connect(splitter);
-    if (chanMode === 'left') {
-      const gain = audioContext.createGain();
-      splitter.connect(gain, 0);
-      tapNode = gain;
-    } else if (chanMode === 'right') {
+    if (chanMode === 'right') {
       const gain = audioContext.createGain();
       splitter.connect(gain, 1);
       tapNode = gain;
     } else {
-      const gainL = audioContext.createGain();
-      const gainR = audioContext.createGain();
-      gainL.gain.value = 0.5;
-      gainR.gain.value = 0.5;
-      splitter.connect(gainL, 0);
-      splitter.connect(gainR, 1);
-      const sum = audioContext.createGain();
-      gainL.connect(sum);
-      gainR.connect(sum);
-      tapNode = sum;
+      const gain = audioContext.createGain();
+      splitter.connect(gain, 0);
+      tapNode = gain;
     }
   }
   // Connect selected channel to recorder
