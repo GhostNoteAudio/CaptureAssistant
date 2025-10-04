@@ -26,6 +26,11 @@ let isPlayingTest = false;
 let directOutConnected = false;
 let inputDeviceInfoById = {};
 
+// ===== Global Options =====
+
+const FFTSizeOptions = [1024, 2048, 4096, 8192, 16384, 32768];
+const IrSizeOptions = [1024, 2048, 4096, 8192];
+
 // ===== Recording State =====
 
 let isRecording = false;
@@ -64,8 +69,117 @@ let meterTapNode = null;
 
 // ===== Export/Settings State =====
 
-const AUTO_EXPORT_KEY = 'ca-auto-export';
 let autoExportEnabled = true;
+
+// ===== Unified UI State Persistence =====
+
+const UI_STATE_KEY = 'ca-ui-state-v1';
+
+function getDefaultUiState() {
+  return {
+    selectedInputId: '',
+    selectedOutputId: '',
+    inputChannel: 'left',
+    signalType: 'white',
+    volume: '0.2',
+    sampleRate: 48000,
+    fftIndex: 2,
+    smooth: 0,
+    irIndex: 2,
+    autoExport: true,
+    filename: { columns: [[], [], []], names: ['Column 1', 'Column 2', 'Column 3'] }
+  };
+}
+
+function loadUiState() {
+  try {
+    const raw = localStorage.getItem(UI_STATE_KEY);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      return { ...getDefaultUiState(), ...obj };
+    }
+  } catch {}
+
+  // Backward-compat: read legacy keys if unified key absent
+  const state = getDefaultUiState();
+  try {
+    const sr = parseInt(localStorage.getItem('ca-sr') || '48000', 10);
+    if ([44100, 48000, 96000].includes(sr)) state.sampleRate = sr;
+  } catch {}
+  try {
+    const v = localStorage.getItem('ca-volume');
+    if (v != null) state.volume = String(v);
+  } catch {}
+  try { state.selectedInputId = localStorage.getItem('ca-selected-input') || ''; } catch {}
+  try { state.selectedOutputId = localStorage.getItem('ca-selected-output') || ''; } catch {}
+  try {
+    const idx = parseInt(localStorage.getItem('ca-fft-index') || '', 10);
+    if (!Number.isNaN(idx)) state.fftIndex = idx;
+  } catch {}
+  try {
+    const sm = parseInt(localStorage.getItem('ca-smooth') || '', 10);
+    if (!Number.isNaN(sm)) state.smooth = sm;
+  } catch {}
+  try {
+    const ir = parseInt(localStorage.getItem('ca-ir-index') || '', 10);
+    if (!Number.isNaN(ir)) state.irIndex = ir;
+  } catch {}
+  try {
+    const ae = localStorage.getItem('ca-auto-export');
+    if (ae === '0') state.autoExport = false;
+    if (ae === '1') state.autoExport = true;
+  } catch {}
+  try {
+    const raw2 = localStorage.getItem(FILENAME_STORE_KEY);
+    if (raw2) {
+      const data = JSON.parse(raw2);
+      if (data && Array.isArray(data.columns) && data.columns.length === 3 && data.columns.every(col => Array.isArray(col))) {
+        state.filename.columns = data.columns.map(col => col.map(v => String(v)));
+      } else if (Array.isArray(data) && data.length === 3) {
+        state.filename.columns = data.map(col => col.map(v => String(v)));
+      }
+      if (data && Array.isArray(data.names) && data.names.length === 3) {
+        state.filename.names = data.names.map(v => String(v) || '');
+      }
+    }
+  } catch {}
+  return state;
+}
+
+function saveUiState(newState) {
+  try {
+    localStorage.setItem(UI_STATE_KEY, JSON.stringify(newState));
+  } catch {}
+  // Keep filename builder in its legacy key as well for compatibility
+  try {
+    const payload = { columns: newState.filename.columns, names: newState.filename.names };
+    localStorage.setItem(FILENAME_STORE_KEY, JSON.stringify(payload));
+  } catch {}
+}
+
+function snapshotUiState() {
+  const fftSlider = document.getElementById('fftSize');
+  const smoothSlider = document.getElementById('smoothSize');
+  const irSizeSlider = document.getElementById('irSize');
+  const inputSel = document.getElementById('inputDevice');
+  const outputSel = document.getElementById('outputDevice');
+  const volEl = document.getElementById('volume');
+  const signalSel = document.getElementById('signalType');
+  const channelSel = document.getElementById('inputChannel');
+  return {
+    selectedInputId: inputSel ? (inputSel.value || '') : '',
+    selectedOutputId: outputSel ? (outputSel.value || '') : '',
+    inputChannel: channelSel ? (channelSel.value || 'left') : 'left',
+    signalType: signalSel ? (signalSel.value || 'white') : 'white',
+    volume: volEl ? String(volEl.value) : '0.2',
+    sampleRate: requestedSampleRate || 48000,
+    fftIndex: fftSlider ? parseInt(fftSlider.value, 10) || 0 : 2,
+    smooth: smoothSlider ? parseInt(smoothSlider.value, 10) || 0 : 0,
+    irIndex: irSizeSlider ? parseInt(irSizeSlider.value, 10) || 0 : 2,
+    autoExport: !!autoExportEnabled,
+    filename: { columns: filenameColumns, names: filenameColumnNames }
+  };
+}
 
 // ===== Capability Checks =====
 
@@ -514,10 +628,9 @@ function exportImpulseResponse() {
 }
 
 function getSelectedIrLength() {
-  const irSizeOpts = [1024, 2048, 4096, 8192];
   const slider = document.getElementById('irSize');
-  const idx = Math.max(0, Math.min(irSizeOpts.length - 1, parseInt(slider.value, 10)));
-  return irSizeOpts[idx];
+  const idx = Math.max(0, Math.min(IrSizeOptions.length - 1, parseInt(slider.value, 10)));
+  return IrSizeOptions[idx];
 }
 
 function setStatus(text) {
@@ -574,23 +687,25 @@ function bindUI() {
   $('#recordBtn').addEventListener('click', onRecordClick);
   $('#playBtn').addEventListener('click', onPlayToggleClick);
   $('#signalType').addEventListener('change', configureGenerator);
+  $('#signalType').addEventListener('change', () => saveUiState(snapshotUiState()));
   $('#volume').addEventListener('input', () => {
     if (masterGain) masterGain.gain.value = parseFloat($('#volume').value);
-    try { localStorage.setItem('ca-volume', String($('#volume').value)); } catch {}
+    saveUiState(snapshotUiState());
   });
-  $('#inputDevice').addEventListener('change', async (e) => { await initAudioIfNeeded(); localStorage.setItem('ca-selected-input', e.target.value || ''); await startInput(e.target.value); });
+  $('#inputDevice').addEventListener('change', async (e) => { await initAudioIfNeeded(); saveUiState(snapshotUiState()); await startInput(e.target.value); });
   const chanSelEl = document.getElementById('inputChannel');
   if (chanSelEl) {
     chanSelEl.addEventListener('change', async () => {
       await initAudioIfNeeded();
       const currentId = document.getElementById('inputDevice')?.value || '';
       await startInput(currentId);
+      saveUiState(snapshotUiState());
     });
   }
   $('#sampleRateSel').addEventListener('change', async (e) => {
     const val = parseInt(e.target.value, 10) || 48000;
     requestedSampleRate = val;
-    localStorage.setItem('ca-sr', String(val));
+    saveUiState(snapshotUiState());
     // Recreate audio graph with new context at next init
     if (audioContext) {
       try { await audioContext.close(); } catch {}
@@ -602,7 +717,7 @@ function bindUI() {
     await applyOutputSink();
     setStatus(`Sample rate set to ${val} Hz.`);
   });
-  $('#outputDevice').addEventListener('change', async (e) => { await initAudioIfNeeded(); localStorage.setItem('ca-selected-output', e.target.value || ''); await applyOutputSink(); });
+  $('#outputDevice').addEventListener('change', async (e) => { await initAudioIfNeeded(); saveUiState(snapshotUiState()); await applyOutputSink(); });
   if (navigator.mediaDevices) navigator.mediaDevices.addEventListener('devicechange', refreshDevices);
 
   // Filename builder events
@@ -619,6 +734,7 @@ function bindUI() {
         filenameColumnNames[c] = txt;
         nameEl.textContent = txt;
         saveFilenameColumns();
+        saveUiState(snapshotUiState());
       };
       nameEl.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); }
@@ -635,22 +751,21 @@ function bindUI() {
   // Spectrum events
   const fftSlider = document.getElementById('fftSize');
   const fftLabel = document.getElementById('fftLabel');
-  const fftOptions = [1024, 2048, 4096, 8192, 16384, 32768];
   // restore saved fft index if present
   try {
     const savedFftIdx = parseInt(localStorage.getItem('ca-fft-index') || '', 10);
-    if (!Number.isNaN(savedFftIdx) && savedFftIdx >= 0 && savedFftIdx < fftOptions.length) {
+    if (!Number.isNaN(savedFftIdx) && savedFftIdx >= 0 && savedFftIdx < FFTSizeOptions.length) {
       fftSlider.value = String(savedFftIdx);
     }
   } catch {}
-  fftLabel.textContent = String(fftOptions[parseInt(fftSlider.value, 10)]);
-  spectrumFftSize = fftOptions[parseInt(fftSlider.value, 10)];
+  fftLabel.textContent = String(FFTSizeOptions[parseInt(fftSlider.value, 10)]);
+  spectrumFftSize = FFTSizeOptions[parseInt(fftSlider.value, 10)];
   fftSlider.addEventListener('input', () => {
-    const idx = Math.max(0, Math.min(fftOptions.length - 1, parseInt(fftSlider.value, 10) || 0));
-    spectrumFftSize = fftOptions[idx];
+    const idx = Math.max(0, Math.min(FFTSizeOptions.length - 1, parseInt(fftSlider.value, 10) || 0));
+    spectrumFftSize = FFTSizeOptions[idx];
     fftLabel.textContent = String(spectrumFftSize);
     drawSpectrum();
-    try { localStorage.setItem('ca-fft-index', String(idx)); } catch {}
+    saveUiState(snapshotUiState());
   });
   const smoothSlider = document.getElementById('smoothSize');
   const smoothLabel = document.getElementById('smoothLabel');
@@ -664,23 +779,22 @@ function bindUI() {
   smoothSlider.addEventListener('input', () => {
     smoothLabel.textContent = String(smoothSlider.value);
     drawSpectrum();
-    try { localStorage.setItem('ca-smooth', String(smoothSlider.value)); } catch {}
+    saveUiState(snapshotUiState());
   });
   const irSizeSlider = document.getElementById('irSize');
   const irSizeLabel = document.getElementById('irSizeLabel');
-  const irSizeOpts = [1024, 2048, 4096, 8192];
   try {
     const savedIrIdx = parseInt(localStorage.getItem('ca-ir-index') || '', 10);
-    if (!Number.isNaN(savedIrIdx) && savedIrIdx >= 0 && savedIrIdx < irSizeOpts.length) {
+    if (!Number.isNaN(savedIrIdx) && savedIrIdx >= 0 && savedIrIdx < IrSizeOptions.length) {
       irSizeSlider.value = String(savedIrIdx);
     }
   } catch {}
-  irSizeLabel.textContent = String(irSizeOpts[parseInt(irSizeSlider.value, 10)]);
+  irSizeLabel.textContent = String(IrSizeOptions[parseInt(irSizeSlider.value, 10)]);
   irSizeSlider.addEventListener('input', () => {
-    const idx = Math.max(0, Math.min(irSizeOpts.length - 1, parseInt(irSizeSlider.value, 10) || 0));
-    irSizeLabel.textContent = String(irSizeOpts[idx]);
+    const idx = Math.max(0, Math.min(IrSizeOptions.length - 1, parseInt(irSizeSlider.value, 10) || 0));
+    irSizeLabel.textContent = String(IrSizeOptions[idx]);
     drawSpectrum();
-    try { localStorage.setItem('ca-ir-index', String(idx)); } catch {}
+    saveUiState(snapshotUiState());
   });
   irSizeSlider.addEventListener('change', () => { drawSpectrum(); });
   // Restore saved volume last, so initAudio can pick it up
@@ -721,7 +835,7 @@ function bindUI() {
     autoBtn.addEventListener('click', () => {
       autoExportEnabled = !autoExportEnabled;
       applyLabel();
-      try { localStorage.setItem(AUTO_EXPORT_KEY, autoExportEnabled ? '1' : '0'); } catch {}
+      saveUiState(snapshotUiState());
     });
   }
 
@@ -734,37 +848,74 @@ window.addEventListener('DOMContentLoaded', () => {
   bindUI();
   (async () => {
     try {
-      const savedSr = parseInt(localStorage.getItem('ca-sr') || '48000', 10);
-      if ([44100, 48000, 96000].includes(savedSr)) {
-        requestedSampleRate = savedSr;
-        const srSel = document.getElementById('sampleRateSel');
-        if (srSel) srSel.value = String(savedSr);
-      }
-      // Restore auto-export
+      // Restore unified UI state
+      const ui = loadUiState();
+      requestedSampleRate = ui.sampleRate;
+      const srSel = document.getElementById('sampleRateSel');
+      if (srSel) srSel.value = String(ui.sampleRate);
+      // Restore static dropdowns prior to audio init
       try {
-        const savedAuto = localStorage.getItem(AUTO_EXPORT_KEY);
-        if (savedAuto === '0') autoExportEnabled = false;
-        else if (savedAuto === '1') autoExportEnabled = true;
-        const autoBtn = document.getElementById('autoExportToggle');
-        if (autoBtn) autoBtn.textContent = `Auto Export: ${autoExportEnabled ? 'On' : 'Off'}`;
+        const signalSel = document.getElementById('signalType');
+        if (signalSel) signalSel.value = ui.signalType;
+        const chanSel = document.getElementById('inputChannel');
+        if (chanSel) chanSel.value = ui.inputChannel;
       } catch {}
+      autoExportEnabled = !!ui.autoExport;
+      const autoBtn = document.getElementById('autoExportToggle');
+      if (autoBtn) autoBtn.textContent = `Auto Export: ${autoExportEnabled ? 'On' : 'Off'}`;
       await initAudioIfNeeded();
       await ensureDeviceAccess();
       await refreshDevices();
       setStatus('Ready.');
       updatePlayButtonLabel();
-      loadFilenameColumns();
+      // Restore settings to UI controls
+      try {
+        const volEl = document.getElementById('volume');
+        if (volEl) {
+          volEl.value = String(ui.volume);
+          if (masterGain) masterGain.gain.value = parseFloat(volEl.value);
+        }
+      } catch {}
+      // Filename builder
+      filenameColumns = ui.filename.columns;
+      filenameColumnNames = ui.filename.names;
       renderFilenameColumns();
-      const savedInput =
-        localStorage.getItem('ca-selected-input') ||
-        document.getElementById('inputDevice')?.value ||
-        '';
+      // Restore device selections
+      try {
+        const inputSel = document.getElementById('inputDevice');
+        const outputSel = document.getElementById('outputDevice');
+        if (inputSel && [...inputSel.options].some(o => o.value === ui.selectedInputId)) inputSel.value = ui.selectedInputId;
+        if (outputSel && [...outputSel.options].some(o => o.value === ui.selectedOutputId)) outputSel.value = ui.selectedOutputId;
+      } catch {}
+      const savedInput = ui.selectedInputId || document.getElementById('inputDevice')?.value || '';
       if (savedInput) {
         try {
           await startInput(savedInput);
         } catch (e) {
           // Ignore errors
         }
+      }
+      // Restore spectrum control selections
+      const fftSlider = document.getElementById('fftSize');
+      const fftLabel = document.getElementById('fftLabel');
+      if (fftSlider && fftLabel) {
+        const idx = Math.max(0, Math.min(FFTSizeOptions.length - 1, ui.fftIndex));
+        fftSlider.value = String(idx);
+        spectrumFftSize = FFTSizeOptions[idx];
+        fftLabel.textContent = String(spectrumFftSize);
+      }
+      const smoothSlider = document.getElementById('smoothSize');
+      const smoothLabel = document.getElementById('smoothLabel');
+      if (smoothSlider && smoothLabel) {
+        smoothSlider.value = String(ui.smooth);
+        smoothLabel.textContent = String(ui.smooth);
+      }
+      const irSizeSlider = document.getElementById('irSize');
+      const irSizeLabel = document.getElementById('irSizeLabel');
+      if (irSizeSlider && irSizeLabel) {
+        const idx = Math.max(0, Math.min(IrSizeOptions.length - 1, ui.irIndex));
+        irSizeSlider.value = String(idx);
+        irSizeLabel.textContent = String(IrSizeOptions[idx]);
       }
     } catch (e) {
       // Silent; user can click Initialize
@@ -779,29 +930,6 @@ function updatePlayButtonLabel() {
 }
 
 // ===== Filename Builder =====
-function loadFilenameColumns() {
-  try {
-    const raw = localStorage.getItem(FILENAME_STORE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    if (
-      data &&
-      Array.isArray(data.columns) &&
-      data.columns.length === 3 &&
-      data.columns.every(col => Array.isArray(col))
-    ) {
-      filenameColumns = data.columns.map(col => col.map(v => String(v)));
-    } else if (Array.isArray(data) && data.length === 3) {
-      filenameColumns = data.map(col => col.map(v => String(v)));
-    }
-    if (data && Array.isArray(data.names) && data.names.length === 3) {
-      filenameColumnNames = data.names.map(v => String(v) || '');
-    }
-  } catch (e) {
-    // Ignore JSON parse errors
-  }
-}
-
 function saveFilenameColumns() {
   const payload = { columns: filenameColumns, names: filenameColumnNames };
   try {
@@ -856,6 +984,7 @@ function addEntry(colIndex) {
   filenameColumns[colIndex].push(value);
   input.value = '';
   saveFilenameColumns();
+  saveUiState(snapshotUiState());
   renderFilenameColumns();
 }
 
@@ -867,6 +996,7 @@ function removeEntry(colIndex, idx) {
   if (selectedIndices[colIndex] === idx) selectedIndices[colIndex] = null;
   else if (selectedIndices[colIndex] != null && selectedIndices[colIndex] > idx) selectedIndices[colIndex]--;
   saveFilenameColumns();
+  saveUiState(snapshotUiState());
   renderFilenameColumns();
 }
 
