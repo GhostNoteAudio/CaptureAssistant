@@ -61,6 +61,11 @@ let meterAnalyser = null;
 let meterTimeData = null;
 let meterRafHandle = 0;
 
+// ===== Export/Settings State =====
+
+const AUTO_EXPORT_KEY = 'ca-auto-export';
+let autoExportEnabled = true;
+
 // ===== Capability Checks =====
 
 const canSelectOutput = () =>
@@ -417,19 +422,20 @@ function stopRecordingFlow() {
   const finalBuf =
     finalSamples === recordTargetSamples ? recordBuffer : recordBuffer.slice(0, finalSamples);
 
-  const wavBlob = encodeWav24(finalBuf, audioContext.sampleRate);
   spectrumSamples = finalBuf;
   drawSpectrum();
 
-  try {
-    exportSpectrumFile();
-  } catch (e) {
-    // Ignore export errors
-  }
-  try {
-    exportImpulseResponse();
-  } catch (e) {
-    // Ignore export errors
+  if (autoExportEnabled) {
+    try {
+      exportSpectrumFile();
+    } catch (e) {
+      // Ignore export errors
+    }
+    try {
+      exportImpulseResponse();
+    } catch (e) {
+      // Ignore export errors
+    }
   }
 
   $('#recordBtn').disabled = false;
@@ -712,6 +718,20 @@ function bindUI() {
   document.getElementById('exportIR').addEventListener('click', () => exportImpulseResponse());
   document.getElementById('exportSpectrum').addEventListener('click', () => exportSpectrumFile());
 
+  // Auto-export toggle
+  const autoBtn = document.getElementById('autoExportToggle');
+  if (autoBtn) {
+    const applyLabel = () => {
+      autoBtn.textContent = `Auto Export: ${autoExportEnabled ? 'On' : 'Off'}`;
+    };
+    applyLabel();
+    autoBtn.addEventListener('click', () => {
+      autoExportEnabled = !autoExportEnabled;
+      applyLabel();
+      try { localStorage.setItem(AUTO_EXPORT_KEY, autoExportEnabled ? '1' : '0'); } catch {}
+    });
+  }
+
   initSpectrumCanvasInteractions();
 }
 
@@ -727,6 +747,14 @@ window.addEventListener('DOMContentLoaded', () => {
         const srSel = document.getElementById('sampleRateSel');
         if (srSel) srSel.value = String(savedSr);
       }
+      // Restore auto-export
+      try {
+        const savedAuto = localStorage.getItem(AUTO_EXPORT_KEY);
+        if (savedAuto === '0') autoExportEnabled = false;
+        else if (savedAuto === '1') autoExportEnabled = true;
+        const autoBtn = document.getElementById('autoExportToggle');
+        if (autoBtn) autoBtn.textContent = `Auto Export: ${autoExportEnabled ? 'On' : 'Off'}`;
+      } catch {}
       await initAudioIfNeeded();
       await ensureDeviceAccess();
       await refreshDevices();
