@@ -1,12 +1,6 @@
 import {
   encodeWav24,
-  nearestPow2,
-  hammingWindow,
-  fftRadix2,
-  ifftRadix2,
   computeSpectrum,
-  hilbertFromScratch,
-  interpDbAt,
   buildMinimumPhaseIRFromMag,
   applyFrequencySmoothing,
   truncateAndWindowIR
@@ -15,7 +9,6 @@ import {
 // ===== Utility Functions =====
 
 const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 // ===== Core Audio State =====
 
@@ -58,7 +51,6 @@ let viewXMax = 24000; // Hz
 let viewYMin = -120; // dB
 let viewYMax = 0; // dB
 let isPanning = false;
-let panStart = null;
 let showImpulse = false;
 let specBackup = { xMin: 20, xMax: 24000, yMin: -120, yMax: 0 };
 let impLastLength = 0;
@@ -1034,9 +1026,13 @@ function initSpectrumCanvasInteractions() {
   if (!canvas) return;
   let lastX = 0, lastY = 0;
   canvas.addEventListener('mousedown', (e) => {
-    isPanning = true; panStart = { x: e.clientX, y: e.clientY }; lastX = e.clientX; lastY = e.clientY;
+    isPanning = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
   });
-  window.addEventListener('mouseup', () => { isPanning = false; panStart = null; });
+  window.addEventListener('mouseup', () => {
+    isPanning = false;
+  });
   canvas.addEventListener('mousemove', (e) => {
     if (!isPanning) return;
     const dx = e.clientX - lastX;
