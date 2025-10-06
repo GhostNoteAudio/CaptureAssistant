@@ -532,6 +532,10 @@ function stopRecordingFlow() {
   spectrumSamples = finalBuf;
   drawSpectrum();
 
+  if (!showImpulse) {
+    resetSpectrumView();
+  }
+
   if (autoExportEnabled) {
     try {
       exportSpectrumFile();
@@ -1314,11 +1318,30 @@ function resetSpectrumView() {
     const margin = maxAbs * 1.1;
     viewYMin = -margin; viewYMax = margin;
   } else {
-    // Reset spectrum axes only (leave FFT slider untouched)
+    // Reset spectrum axes with auto vertical range
     viewXMin = 20;
     viewXMax = 24000;
-    viewYMin = -120;
-    viewYMax = 0;
+    if (spectrumSamples && audioContext) {
+      const sr = audioContext.sampleRate | 0;
+      let { freq, magDb } = computeSpectrum(spectrumSamples, sr, spectrumFftSize);
+      const smoothSlider = document.getElementById('smoothSize');
+      const smoothFactor = smoothSlider ? (parseInt(smoothSlider.value, 10) || 0) / 100 : 0;
+      if (smoothFactor > 0) { magDb = applyFrequencySmoothing(freq, magDb, smoothFactor, spectrumFftSize); }
+      let topDb = -Infinity;
+      for (let i = 1; i < freq.length; i++) {
+        const f = freq[i];
+        if (f >= 20 && f <= 20000) {
+          const d = magDb[i];
+          if (Number.isFinite(d) && d > topDb) topDb = d;
+        }
+      }
+      if (!Number.isFinite(topDb)) topDb = 0;
+      viewYMax = topDb + 1;
+      viewYMin = viewYMax - 70;
+    } else {
+      viewYMax = 0;
+      viewYMin = -70;
+    }
   }
   drawSpectrum();
 }
