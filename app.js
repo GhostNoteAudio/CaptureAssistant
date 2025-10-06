@@ -644,7 +644,7 @@ function exportRawAudio() {
   const sr = audioContext.sampleRate | 0;
   const blob = encodeWav24(spectrumSamples, sr);
   const base = buildFilenameBase();
-  const name = `${base || 'IR'}.raw.wav`;
+  const name = `${base || 'IR'}.audio.wav`;
   triggerDownload(blob, name);
   setStatus(`Exported raw audio: ${name}`);
 }
