@@ -543,6 +543,11 @@ function stopRecordingFlow() {
     } catch (e) {
       // Ignore export errors
     }
+    try {
+      exportRawAudio();
+    } catch (e) {
+      // Ignore export errors
+    }
   }
 
   $('#recordBtn').disabled = false;
@@ -625,6 +630,19 @@ function exportImpulseResponse() {
   const name = `${base || 'IR'}.wav`;
   triggerDownload(blob, name);
   setStatus(`Exported IR: ${name}`);
+}
+
+function exportRawAudio() {
+  if (!spectrumSamples || !audioContext) {
+    setStatus('Nothing to export. Perform a capture first.');
+    return;
+  }
+  const sr = audioContext.sampleRate | 0;
+  const blob = encodeWav24(spectrumSamples, sr);
+  const base = buildFilenameBase();
+  const name = `${base || 'IR'}.raw.wav`;
+  triggerDownload(blob, name);
+  setStatus(`Exported raw audio: ${name}`);
 }
 
 function getSelectedIrLength() {
@@ -824,6 +842,8 @@ function bindUI() {
   });
   document.getElementById('exportIR').addEventListener('click', () => exportImpulseResponse());
   document.getElementById('exportSpectrum').addEventListener('click', () => exportSpectrumFile());
+  const rawBtn = document.getElementById('exportRaw');
+  if (rawBtn) rawBtn.addEventListener('click', () => exportRawAudio());
 
   // Auto-export toggle
   const autoBtn = document.getElementById('autoExportToggle');
